@@ -14,7 +14,7 @@ func main() {
 		stdlog.Fatal(err)
 	}
 
-	logger, err := log.NewLogger(cfg.ServiceName, cfg.LogLevel)
+	logger, err := log.NewLogger(cfg.Server.ServiceName, cfg.Server.LogLevel)
 	if err != nil {
 		stdlog.Fatal(err)
 	}
