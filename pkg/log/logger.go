@@ -1,15 +1,32 @@
 package log
 
 import (
+	"context"
 	"fmt"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 const (
 	fieldService   = "service"
 	fieldComponent = "component"
 )
+
+// Field is a structured log field.
+type Field = zapcore.Field
+
+func String(key, value string) Field {
+	return zap.String(key, value)
+}
+
+func Int(key string, value int) Field {
+	return zap.Int(key, value)
+}
+
+func Err(err error) Field {
+	return zap.Error(err)
+}
 
 type Logger interface {
 	Info(msg string, fields ...Field)
@@ -18,6 +35,7 @@ type Logger interface {
 	Debug(msg string, fields ...Field)
 	Component(name string) Logger
 	With(fields ...Field) Logger
+	WithContext(ctx context.Context) Logger
 	Sync() error
 }
 
@@ -41,7 +59,10 @@ func NewLogger(serviceName, level string) (Logger, error) {
 		return nil, fmt.Errorf("build zap logger: %w", err)
 	}
 
-	return &zapLogger{logger: zl}, nil
+	logger := &zapLogger{logger: zl}
+	defaultLogger = logger
+
+	return logger, nil
 }
 
 func (l *zapLogger) Info(msg string, fields ...Field) {
@@ -70,6 +91,25 @@ func (l *zapLogger) With(fields ...Field) Logger {
 	return &zapLogger{
 		logger: l.logger.With(fields...),
 	}
+}
+
+func (l *zapLogger) WithContext(ctx context.Context) Logger {
+	if logger, ok := ctx.Value(loggerCtxKey{}).(Logger); ok {
+		return logger
+	}
+
+	var fields []Field
+	if field, ok := requestIDFieldFromContext(ctx); ok {
+		fields = append(fields, field)
+	}
+	if field, ok := trackingIDFieldFromContext(ctx); ok {
+		fields = append(fields, field)
+	}
+	if len(fields) == 0 {
+		return l
+	}
+
+	return l.With(fields...)
 }
 
 func (l *zapLogger) Sync() error {

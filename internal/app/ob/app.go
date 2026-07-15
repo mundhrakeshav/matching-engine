@@ -2,7 +2,7 @@ package ob
 
 import (
 	"ob/config"
-	"ob/internal/pkg/log"
+	"ob/pkg/log"
 )
 
 func Run(cfg *config.Config, logger log.Logger) error {

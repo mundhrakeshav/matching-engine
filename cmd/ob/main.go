@@ -5,7 +5,7 @@ import (
 
 	"ob/config"
 	"ob/internal/app/ob"
-	"ob/internal/pkg/log"
+	"ob/pkg/log"
 )
 
 func main() {
