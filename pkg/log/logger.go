@@ -24,6 +24,10 @@ func Int(key string, value int) Field {
 	return zap.Int(key, value)
 }
 
+func Any(key string, value any) Field {
+	return zap.Any(key, value)
+}
+
 func Err(err error) Field {
 	return zap.Error(err)
 }

@@ -9,9 +9,8 @@ import (
 	"syscall"
 
 	"ob/config"
+	appstorage "ob/internal/app"
 	"ob/internal/controller"
-	"ob/internal/entity"
-	"ob/internal/matching"
 	"ob/pkg/httpserver"
 	"ob/pkg/log"
 )
@@ -26,11 +25,18 @@ func Run(cfg *config.Config, logger log.Logger) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	book := entity.NewBook()
-	engine := matching.NewEngine(book)
+	is, err := appstorage.NewIntegrationStorage(cfg)
+	if err != nil {
+		return err
+	}
+
+	ss, err := appstorage.NewServiceStorage(cfg, is)
+	if err != nil {
+		return err
+	}
 
 	server := httpserver.NewServer(cfg.Server.Host, cfg.Server.Port)
-	controller.SetupRouter(cfg.Server.ServiceName, server.Router(), engine)
+	controller.SetupRouter(cfg.Server.ServiceName, server.Router(), ss.Engine)
 	server.Start(ctx)
 
 	quit := make(chan os.Signal, 1)

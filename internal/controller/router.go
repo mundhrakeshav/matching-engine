@@ -22,5 +22,9 @@ func SetupRouter(
 	matchingV1 := apiV1.Group("/matching")
 	{
 		matchingV1.GET("/status", handler.MakeStatusHandler())
+		matchingV1.POST("/order", handler.MakeSubmitOrderHandler())
+		matchingV1.GET("/order/:id", handler.MakeSubmitOrderHandler())
+		matchingV1.PATCH("/order/:id", handler.MakeSubmitOrderHandler())
+		matchingV1.DELETE("/order/:id", handler.MakeSubmitOrderHandler())
 	}
 }
