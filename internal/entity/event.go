@@ -1,16 +1,13 @@
 package entity
 
-import "encoding/json"
-
-type Action string
-
 const (
-	ActionNew    Action = "new"
-	ActionModify Action = "modify"
-	ActionCancel Action = "cancel"
+	OperationUnknown OperationType = iota
+	OperationNewOrder
+	OperationModifyOrder
+	OperationCancelOrder
 )
 
 type OrderBookEvent struct {
-	Order  json.RawMessage
-	Action Action
+	Order Order         `json:"order"`
+	Op    OperationType `json:"op"`
 }
