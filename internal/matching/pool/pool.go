@@ -52,7 +52,7 @@ func (p *Pool[T]) Get(idx entity.NodeID) (*T, error) {
 		return nil, errInvalidIndex
 	}
 
-	if !p.isAllocated(idx) {
+	if !p.IsAllocated(idx) {
 		return nil, errSlotNotAllocated
 	}
 
@@ -65,7 +65,7 @@ func (p *Pool[T]) Release(idx entity.NodeID) error {
 	if idx >= entity.NodeID(len(p.values)) {
 		return errInvalidIndex
 	}
-	if !p.isAllocated(idx) {
+	if !p.IsAllocated(idx) {
 		return errSlotNotAllocated
 	}
 
@@ -77,7 +77,7 @@ func (p *Pool[T]) Release(idx entity.NodeID) error {
 	return nil
 }
 
-func (p *Pool[T]) isAllocated(idx entity.NodeID) bool {
+func (p *Pool[T]) IsAllocated(idx entity.NodeID) bool {
 	return p.allocated[idx/64]&(uint64(1)<<(idx%64)) != 0
 }
 

@@ -4,7 +4,9 @@ import "time"
 
 type Trade struct {
 	ID                         TradeID
-	MakerID, TakerID           uint64
+	Sequence                   SequenceNumber
+	InstrumentID               InstrumentID
+	MakerID, TakerID           UserID
 	Qty                        Quantity
 	Price                      Price
 	MakerOrderID, TakerOrderID OrderID

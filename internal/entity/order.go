@@ -27,9 +27,11 @@ type Order struct {
 }
 
 type OrderNode struct {
-	RestingOrder RestingOrder
+	ID           NodeID
 	Next         NodeID
 	Prev         NodeID
+	RestingOrder RestingOrder
+	Price        Price
 }
 
 func (k OrderKindType) validate() error {
@@ -57,8 +59,11 @@ func (o *Order) Validate() error {
 	if o.OriginalQty <= 0 {
 		return errors.New("quantity must be positive")
 	}
+	if o.OpenQty == 0 || o.OpenQty > o.OriginalQty {
+		return errors.New("open quantity must be positive and no greater than original quantity")
+	}
 
-	if o.LimitPrice <= 0 {
+	if o.OrderKind == OrderKindLimit && o.LimitPrice <= 0 {
 		return errors.New("price must be positive")
 	}
 	return nil
