@@ -54,13 +54,17 @@ impl Order {
     ///
     /// Returns an error when the order cannot be accepted by the matching core.
     pub fn validate(&self) -> Result<(), OrderError> {
-        if self.resting.original_qty == 0 {
+        if self.resting.original_qty == Quantity::from(0) {
             return Err(OrderError::ZeroQuantity);
         }
-        if self.resting.open_qty == 0 || self.resting.open_qty > self.resting.original_qty {
+        if self.resting.open_qty == Quantity::from(0)
+            || self.resting.open_qty > self.resting.original_qty
+        {
             return Err(OrderError::InvalidOpenQuantity);
         }
-        if self.kind == OrderKind::Limit && self.limit_price.is_none_or(|price| price <= 0) {
+        if self.kind == OrderKind::Limit
+            && self.limit_price.is_none_or(|price| price <= Price::from(0))
+        {
             return Err(OrderError::InvalidLimitPrice);
         }
         Ok(())

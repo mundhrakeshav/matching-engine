@@ -1,4 +1,4 @@
-use crate::domain::{Order, Sequence};
+use crate::domain::{Order, OrderId, Sequence};
 
 use super::{Book, BookError, ExecutionReport, OrderBookSnapshot};
 
@@ -13,7 +13,7 @@ impl Engine {
     pub fn new(book_capacity: usize) -> Self {
         Self {
             book: Book::new(book_capacity),
-            sequence: 0,
+            sequence: Sequence::from(0),
         }
     }
 
@@ -38,7 +38,7 @@ impl Engine {
     ///
     /// Returns an error when the sequence space is exhausted or the order is not
     /// currently resting.
-    pub fn cancel(&mut self, order_id: u64) -> Result<(), BookError> {
+    pub fn cancel(&mut self, order_id: OrderId) -> Result<(), BookError> {
         self.sequence = self
             .sequence
             .checked_add(1)

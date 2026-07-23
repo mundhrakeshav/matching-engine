@@ -72,7 +72,6 @@ impl From<ArenaError> for BookError {
 /// single writer without internal locking or timing-dependent behavior.
 #[derive(Debug)]
 pub struct Book {
-    capacity: usize,
     arena: Arena<OrderNode>,
     bids: BTreeMap<Price, PriceLevel>,
     asks: BTreeMap<Price, PriceLevel>,
@@ -82,7 +81,6 @@ pub struct Book {
 impl Book {
     pub fn new(capacity: usize) -> Self {
         Self {
-            capacity,
             arena: Arena::with_capacity(capacity),
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
@@ -107,24 +105,28 @@ impl Book {
         }
 
         let mut trades = Vec::new();
-        while taker.resting.open_qty > 0 {
+        // if resting order has open qty over 0
+        while taker.resting.open_qty > Quantity::from(0) {
+            // If best opp price isnt found then break
             let Some(price) = self.best_opposite_price(taker.side) else {
                 break;
             };
+
+            // If taker doesnt cross the spread then break
             if taker.kind == OrderKind::Limit && !taker.crosses(price) {
                 break;
             }
-            let maker_id = self
+
+            // head index - the order that we try to match
+            let maker_idx = self
                 .level(taker.side, price)?
                 .head
                 .ok_or(BookError::Invariant("non-empty level has no head"))?;
+
+            //
             let (maker_order, maker_price, maker_quantity) = {
-                let maker = self.arena.get(maker_id)?;
-                (
-                    maker.order.clone(),
-                    maker.price,
-                    maker.order.resting.open_qty,
-                )
+                let maker = self.arena.get(maker_idx)?;
+                (&maker.order, maker.price, maker.order.resting.open_qty)
             };
             let quantity = taker.resting.open_qty.min(maker_quantity);
             let trade = Trade {
@@ -138,11 +140,11 @@ impl Book {
                 price: maker_price,
             };
             taker.resting.open_qty -= quantity;
-            self.apply_maker_fill(taker.side, maker_id, price, quantity)?;
+            self.apply_maker_fill(taker.side, maker_idx, price, quantity)?;
             trades.push(trade);
         }
 
-        if taker.resting.open_qty > 0 && taker.kind == OrderKind::Limit {
+        if taker.resting.open_qty > Quantity::from(0) && taker.kind == OrderKind::Limit {
             self.rest(taker.clone())?;
         }
         self.check_invariants()?;
@@ -209,7 +211,6 @@ impl Book {
                 prev: None,
                 next: None,
             },
-            self.capacity,
         )?;
         let tail = self.levels(side).get(&price).and_then(|level| level.tail);
         if let Some(tail) = tail {
@@ -238,7 +239,7 @@ impl Book {
             let maker = self.arena.get_mut(node_id)?;
             maker.order.resting.open_qty -= quantity;
         }
-        let fully_filled = self.arena.get(node_id)?.order.resting.open_qty == 0;
+        let fully_filled = self.arena.get(node_id)?.order.resting.open_qty == Quantity::from(0);
         let maker_side = match taker_side {
             OrderSide::Buy => OrderSide::Sell,
             OrderSide::Sell => OrderSide::Buy,
@@ -334,7 +335,7 @@ impl Book {
                 if (level.count == 0) != (level.head.is_none() && level.tail.is_none()) {
                     return Err(BookError::Invariant("empty level links are inconsistent"));
                 }
-                let mut total = 0;
+                let mut total = Quantity::from(0);
                 let mut count = 0;
                 let mut previous = None;
                 let mut current = level.head;

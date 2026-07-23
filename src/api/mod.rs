@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
 
 use crate::{
-    domain::{Order, OrderKind, OrderSide, RestingOrder},
+    domain::{
+        Order, OrderId, OrderKind, OrderSide, Price, Quantity, RestingOrder, Sequence, UserId,
+    },
     matching::{BookError, Engine, ExecutionReport, OrderBookSnapshot},
 };
 
@@ -113,7 +115,7 @@ async fn cancel_order(
         .engine
         .lock()
         .map_err(|_| ApiError::internal("matching engine lock poisoned"))?;
-    engine.cancel(id).map_err(ApiError::from)?;
+    engine.cancel(OrderId::from(id)).map_err(ApiError::from)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -147,13 +149,13 @@ impl SubmitOrderRequest {
     fn into_order(self) -> Order {
         Order {
             resting: RestingOrder {
-                id: self.id,
-                user_id: self.user_id,
-                original_qty: self.quantity,
-                open_qty: self.quantity,
-                accepted_sequence: 0,
+                id: OrderId::from(self.id),
+                user_id: UserId::from(self.user_id),
+                original_qty: Quantity::from(self.quantity),
+                open_qty: Quantity::from(self.quantity),
+                accepted_sequence: Sequence::from(0),
             },
-            limit_price: self.limit_price,
+            limit_price: self.limit_price.map(Price::from),
             kind: self.kind,
             side: self.side,
             allow_partial: self.allow_partial,

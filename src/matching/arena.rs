@@ -13,6 +13,7 @@ impl NodeId {
 pub(super) struct Arena<T> {
     slots: Vec<Option<T>>,
     free: Vec<NodeId>,
+    capacity: usize,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -28,15 +29,16 @@ impl<T> Arena<T> {
         Self {
             slots: Vec::with_capacity(capacity),
             free: Vec::new(),
+            capacity,
         }
     }
 
-    pub(super) fn allocate(&mut self, value: T, capacity: usize) -> Result<NodeId, ArenaError> {
+    pub(super) fn allocate(&mut self, value: T) -> Result<NodeId, ArenaError> {
         if let Some(id) = self.free.pop() {
             self.slots[id.index()] = Some(value);
             return Ok(id);
         }
-        if self.slots.len() == capacity {
+        if self.slots.len() == self.capacity {
             return Err(ArenaError::Exhausted);
         }
         let id = NodeId(self.slots.len());
@@ -50,6 +52,7 @@ impl<T> Arena<T> {
             .and_then(Option::as_ref)
             .ok_or(ArenaError::InvalidNode)
     }
+
 
     pub(super) fn get_mut(&mut self, id: NodeId) -> Result<&mut T, ArenaError> {
         self.slots
