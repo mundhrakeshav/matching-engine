@@ -1,23 +1,5 @@
-# Binaries
-bin/
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-
-# Test binary
-*.test
-
-# Output of go coverage
-*.out
-
-# Vendor (uncomment if you use go mod vendor)
-# vendor/
-
-# Go workspace
-go.work
-go.work.sum
+# Rust build output
+/target/
 
 # Local env
 .env

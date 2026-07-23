@@ -1,45 +1,29 @@
-.PHONY: build run run-local setup-local test tidy clean
+.DEFAULT_GOAL := help
 
-BINARY := ob
+.PHONY: help build run run-local test fmt lint check clean
 
-DB_CONTAINER := ob-postgres
-DB_IMAGE := postgres:16-alpine
-DB_HOST := localhost
-DB_PORT := 5432
-DB_USER := ob
-DB_PASSWORD := ob_local
-DB_NAME := ob
+help:
+	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ {printf "%-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-build:
-	go build -o bin/$(BINARY) ./cmd/$(BINARY)
+build: ## Build the optimized release binary.
+	cargo build --release
 
-run:
-	go run ./cmd/$(BINARY)
+run: ## Run with the current environment.
+	cargo run
 
-run-local:
-	ENV=local go run ./cmd/$(BINARY)
+run-local: ## Load .env and run locally.
+	ENV=local cargo run
 
-setup-local:
-	@if docker ps -a --format '{{.Names}}' | grep -qx '$(DB_CONTAINER)'; then \
-		echo "starting existing container $(DB_CONTAINER)"; \
-		docker start $(DB_CONTAINER); \
-	else \
-		echo "creating container $(DB_CONTAINER)"; \
-		docker run -d \
-			--name $(DB_CONTAINER) \
-			-e POSTGRES_USER=$(DB_USER) \
-			-e POSTGRES_PASSWORD=$(DB_PASSWORD) \
-			-e POSTGRES_DB=$(DB_NAME) \
-			-p $(DB_PORT):5432 \
-			$(DB_IMAGE); \
-	fi
-	@echo "postgres ready at $(DB_HOST):$(DB_PORT) (user=$(DB_USER), db=$(DB_NAME))"
+test: ## Run all tests.
+	cargo test
 
-test:
-	go test ./...
+fmt: ## Verify Rust formatting.
+	cargo fmt --check
 
-tidy:
-	go mod tidy
+lint: ## Run strict Clippy checks.
+	cargo clippy --all-targets --all-features -- -D warnings
 
-clean:
-	rm -rf bin/
+check: fmt lint test ## Run all local quality checks.
+
+clean: ## Remove Cargo build artifacts.
+	cargo clean
