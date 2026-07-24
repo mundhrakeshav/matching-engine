@@ -48,6 +48,8 @@ pub enum BookError {
     Invariant(&'static str),
     #[error("engine sequence exhausted")]
     SequenceExhausted,
+    #[error("order not found: {0}")]
+    OrderNotFound(OrderId),
 }
 
 /// A single planned trade between the incoming taker and a resting maker,
@@ -110,18 +112,6 @@ impl Book {
         }
     }
 
-    pub fn try_with_config(
-        capacity: usize,
-        tick_size: TickSize,
-        lot_size: LotSize,
-        book_cap: u64,
-        max_order_quantity: Quantity,
-    ) -> Result<Self, BookError> {
-        let book = Self::with_config(capacity, tick_size, lot_size, book_cap, max_order_quantity);
-        book.validate_configuration()?;
-        Ok(book)
-    }
-
     /// Matches an order and rests any eligible unfilled limit remainder.
     ///
     /// `submit` owns the matching loop. Each iteration computes one read-only
@@ -137,7 +127,6 @@ impl Book {
         mut order: Order,
         sequence: Sequence,
     ) -> Result<ExecutionReport, BookError> {
-        self.validate_configuration()?;
         order.validate()?;
         self.validate_order_constraints(&order)?;
 
@@ -165,23 +154,6 @@ impl Book {
             remaining_quantity: order.resting.open_qty,
             trades,
         })
-    }
-
-    fn validate_configuration(&self) -> Result<(), BookError> {
-        if self.tick_size == TickSize::from(0) {
-            return Err(BookError::InvalidConfiguration(
-                "tick size must be positive",
-            ));
-        }
-        if self.lot_size == LotSize::from(0) {
-            return Err(BookError::InvalidConfiguration("lot size must be positive"));
-        }
-        if self.max_order_quantity == Quantity::from(0) {
-            return Err(BookError::InvalidConfiguration(
-                "maximum order quantity must be positive",
-            ));
-        }
-        Ok(())
     }
 
     fn validate_order_constraints(&self, order: &Order) -> Result<(), BookError> {
@@ -482,6 +454,27 @@ impl Book {
         Ok(())
     }
 
+    /// Removes a resting order and returns it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BookError::OrderNotFound`] if no resting order matches
+    /// `order_id`.
+    pub fn cancel(&mut self, order_id: OrderId) -> Result<Order, BookError> {
+        let node_id = *self
+            .locations
+            .get(&order_id)
+            .ok_or(BookError::OrderNotFound(order_id))?;
+        let order = self
+            .arena
+            .get(node_id)
+            .map_err(|_| BookError::Invariant("removed order node was released"))?
+            .order
+            .clone();
+        self.remove_resting(node_id)?;
+        Ok(order)
+    }
+
     fn remove_resting(&mut self, node_id: NodeId) -> Result<(), BookError> {
         let (order_id, side, price, previous, next) = {
             let node = self
@@ -496,6 +489,8 @@ impl Book {
                 node.next,
             )
         };
+
+        // OpenQty
         let remaining = self
             .arena
             .get(node_id)
@@ -503,38 +498,56 @@ impl Book {
             .order
             .resting
             .open_qty;
+
         let level = self
             .levels(side)
             .get(&price)
             .ok_or(BookError::Invariant("removed order price level is missing"))?;
+
+        //count--
         let next_count = level.count.checked_sub(1).ok_or(BookError::Invariant(
             "price level count underflow while removing an order",
         ))?;
+
+        //qty - remaining
         let next_quantity = level
             .quantity
             .checked_sub(remaining)
             .ok_or(BookError::Invariant(
                 "price level quantity underflow while removing an order",
             ))?;
+        let next_total_quantity =
+            self.total_quantity
+                .checked_sub(remaining)
+                .ok_or(BookError::Invariant(
+                    "removed order exceeds aggregate book quantity",
+                ))?;
+
         if self.locations.get(&order_id) != Some(&node_id) {
             return Err(BookError::Invariant(
                 "removed order location does not reference its node",
             ));
         }
+
+        // Sanity Check
         self.validate_removal_links(node_id, previous, next, level)?;
 
+        // previous.next = next
         if let Some(previous) = previous {
             self.arena
                 .get_mut(previous)
                 .map_err(|_| BookError::Invariant("validated previous node was released"))?
                 .next = next;
         }
+
+        // next.prev = previous
         if let Some(next) = next {
             self.arena
                 .get_mut(next)
                 .map_err(|_| BookError::Invariant("validated next node was released"))?
                 .prev = previous;
         }
+
         let level = self
             .levels_mut(side)
             .get_mut(&price)
@@ -550,6 +563,7 @@ impl Book {
         level.count = next_count;
         level.quantity = next_quantity;
         let empty = level.count == 0;
+        self.total_quantity = next_total_quantity;
         if empty {
             self.levels_mut(side).remove(&price);
         }
@@ -567,16 +581,20 @@ impl Book {
         next: Option<NodeId>,
         level: &PriceLevel,
     ) -> Result<(), BookError> {
+        // If node is head then prev should be none
         if previous.is_none() != (level.head == Some(node_id)) {
             return Err(BookError::Invariant(
                 "removed order predecessor and level head disagree",
             ));
         }
+
+        // If node is tail then next should be none
         if next.is_none() != (level.tail == Some(node_id)) {
             return Err(BookError::Invariant(
                 "removed order successor and level tail disagree",
             ));
         }
+
         if let Some(previous_id) = previous {
             let previous_node = self
                 .arena
@@ -1088,22 +1106,87 @@ mod tests {
         );
     }
 
+    /// Cancels an order and asserts the book's structural invariants still
+    /// hold afterwards, regardless of success or failure.
+    fn cancel(book: &mut Book, order_id: OrderId) -> Result<Order, BookError> {
+        let result = book.cancel(order_id);
+        assert_invariants(book);
+        result
+    }
+
     #[test]
-    fn invalid_configuration_is_rejected() {
+    fn cancel_removes_a_resting_order() {
+        let mut book = Book::new(4);
+        submit(&mut book, limit(1, OrderSide::Buy, 100, 5), 1).unwrap();
+
+        let cancelled = cancel(&mut book, OrderId::from(1)).unwrap();
+
+        assert_eq!(cancelled.resting.id, OrderId::from(1));
+        assert_eq!(cancelled.resting.open_qty, Quantity::from(5));
+        assert!(book.bids.is_empty());
+        assert_eq!(book.locations.len(), 0);
+    }
+
+    #[test]
+    fn cancel_drops_a_price_level_once_it_is_empty() {
+        let mut book = Book::new(4);
+        submit(&mut book, limit(1, OrderSide::Sell, 100, 5), 1).unwrap();
+        submit(&mut book, limit(2, OrderSide::Sell, 100, 3), 2).unwrap();
+
+        cancel(&mut book, OrderId::from(1)).unwrap();
         assert_eq!(
-            Book::try_with_config(4, TickSize::from(0), LotSize::from(1), 0, Quantity::from(1))
-                .unwrap_err(),
-            BookError::InvalidConfiguration("tick size must be positive")
+            book.asks.get(&Price::from(100)).unwrap().quantity,
+            Quantity::from(3)
         );
+
+        cancel(&mut book, OrderId::from(2)).unwrap();
+        assert!(book.asks.is_empty());
+    }
+
+    #[test]
+    fn cancel_unknown_order_is_rejected() {
+        let mut book = Book::new(4);
+
         assert_eq!(
-            Book::try_with_config(4, TickSize::from(1), LotSize::from(0), 0, Quantity::from(1))
-                .unwrap_err(),
-            BookError::InvalidConfiguration("lot size must be positive")
+            cancel(&mut book, OrderId::from(1)),
+            Err(BookError::OrderNotFound(OrderId::from(1)))
         );
+    }
+
+    #[test]
+    fn cancel_already_filled_order_is_rejected() {
+        let mut book = Book::new(4);
+        submit(&mut book, limit(1, OrderSide::Sell, 100, 5), 1).unwrap();
+        submit(&mut book, limit(2, OrderSide::Buy, 100, 5), 2).unwrap();
+
         assert_eq!(
-            Book::try_with_config(4, TickSize::from(1), LotSize::from(1), 0, Quantity::from(0))
-                .unwrap_err(),
-            BookError::InvalidConfiguration("maximum order quantity must be positive")
+            cancel(&mut book, OrderId::from(1)),
+            Err(BookError::OrderNotFound(OrderId::from(1)))
         );
+    }
+
+    #[test]
+    fn cancel_already_cancelled_order_is_rejected() {
+        let mut book = Book::new(4);
+        submit(&mut book, limit(1, OrderSide::Buy, 100, 5), 1).unwrap();
+        cancel(&mut book, OrderId::from(1)).unwrap();
+
+        assert_eq!(
+            cancel(&mut book, OrderId::from(1)),
+            Err(BookError::OrderNotFound(OrderId::from(1)))
+        );
+    }
+
+    #[test]
+    fn cancel_leaves_the_rest_of_the_book_matchable() {
+        let mut book = Book::new(4);
+        submit(&mut book, limit(1, OrderSide::Sell, 100, 5), 1).unwrap();
+        submit(&mut book, limit(2, OrderSide::Sell, 101, 5), 2).unwrap();
+
+        cancel(&mut book, OrderId::from(1)).unwrap();
+
+        let report = submit(&mut book, limit(3, OrderSide::Buy, 101, 5), 3).unwrap();
+        assert_eq!(fills(&report), vec![(OrderId::from(2), 5, 101)]);
+        assert!(book.asks.is_empty());
     }
 }
