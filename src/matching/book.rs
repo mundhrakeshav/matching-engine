@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 
 use crate::domain::{
-    Order, OrderError, OrderId, OrderKind, OrderSide, Price, Quantity, Sequence, Trade,
+    LotSize, Order, OrderError, OrderId, OrderKind, OrderSide, Price, Quantity, Sequence, TickSize,
+    Trade,
 };
 
 use super::arena::{Arena, ArenaError, NodeId};
@@ -41,6 +42,8 @@ pub enum BookError {
     Full,
     #[error("aggregate quantity exceeds the supported range")]
     QuantityOverflow,
+    #[error("invalid book configuration: {0}")]
+    InvalidConfiguration(&'static str),
     #[error("order book invariant violated: {0}")]
     Invariant(&'static str),
     #[error("engine sequence exhausted")]
@@ -63,6 +66,11 @@ pub struct Book {
     arena: Arena<OrderNode>,
     bids: BTreeMap<Price, PriceLevel>,
     asks: BTreeMap<Price, PriceLevel>,
+    tick_size: TickSize,
+    lot_size: LotSize,
+    cap: u64,
+    max_order_quantity: Quantity,
+    total_quantity: Quantity,
     locations: HashMap<OrderId, NodeId>,
 }
 
@@ -73,7 +81,45 @@ impl Book {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             locations: HashMap::new(),
+            tick_size: TickSize::from(1),
+            lot_size: LotSize::from(1),
+            cap: 0,
+            max_order_quantity: Quantity::from(u64::MAX),
+            total_quantity: Quantity::from(0),
         }
+    }
+
+    /// Creates a book with explicit instrument configuration.
+    pub fn with_config(
+        capacity: usize,
+        tick_size: TickSize,
+        lot_size: LotSize,
+        book_cap: u64,
+        max_order_quantity: Quantity,
+    ) -> Self {
+        Self {
+            arena: Arena::with_capacity(capacity),
+            bids: BTreeMap::new(),
+            asks: BTreeMap::new(),
+            locations: HashMap::new(),
+            tick_size,
+            lot_size,
+            cap: book_cap,
+            max_order_quantity,
+            total_quantity: Quantity::from(0),
+        }
+    }
+
+    pub fn try_with_config(
+        capacity: usize,
+        tick_size: TickSize,
+        lot_size: LotSize,
+        book_cap: u64,
+        max_order_quantity: Quantity,
+    ) -> Result<Self, BookError> {
+        let book = Self::with_config(capacity, tick_size, lot_size, book_cap, max_order_quantity);
+        book.validate_configuration()?;
+        Ok(book)
     }
 
     /// Matches an order and rests any eligible unfilled limit remainder.
@@ -91,7 +137,9 @@ impl Book {
         mut order: Order,
         sequence: Sequence,
     ) -> Result<ExecutionReport, BookError> {
+        self.validate_configuration()?;
         order.validate()?;
+        self.validate_order_constraints(&order)?;
 
         if self.locations.contains_key(&order.resting.id) {
             return Err(BookError::DuplicateOrder(order.resting.id));
@@ -117,6 +165,51 @@ impl Book {
             remaining_quantity: order.resting.open_qty,
             trades,
         })
+    }
+
+    fn validate_configuration(&self) -> Result<(), BookError> {
+        if self.tick_size == TickSize::from(0) {
+            return Err(BookError::InvalidConfiguration(
+                "tick size must be positive",
+            ));
+        }
+        if self.lot_size == LotSize::from(0) {
+            return Err(BookError::InvalidConfiguration("lot size must be positive"));
+        }
+        if self.max_order_quantity == Quantity::from(0) {
+            return Err(BookError::InvalidConfiguration(
+                "maximum order quantity must be positive",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_order_constraints(&self, order: &Order) -> Result<(), BookError> {
+        if order.resting.original_qty > self.max_order_quantity {
+            return Err(BookError::InvalidConfiguration(
+                "order quantity exceeds maximum order quantity",
+            ));
+        }
+        let lot_size: u64 = self.lot_size.into();
+        if order.resting.original_qty.into_inner() % lot_size != 0
+            || order.resting.open_qty.into_inner() % lot_size != 0
+        {
+            return Err(BookError::InvalidConfiguration(
+                "order quantity must be a multiple of lot size",
+            ));
+        }
+        if order.kind == OrderKind::Limit {
+            let price = order
+                .limit_price
+                .ok_or(BookError::Invariant("validated limit order has no price"))?;
+            let tick_size: u32 = self.tick_size.into();
+            if price.into_inner() % i64::from(tick_size) != 0 {
+                return Err(BookError::InvalidConfiguration(
+                    "limit price must be a multiple of tick size",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Returns the next fill without mutating the book or taker.
@@ -269,6 +362,14 @@ impl Book {
             .checked_add(quantity)
             .ok_or(BookError::QuantityOverflow)?;
 
+        let next_total_quantity = self
+            .total_quantity
+            .checked_add(quantity)
+            .ok_or(BookError::QuantityOverflow)?;
+        if self.cap > 0 && next_total_quantity.into_inner() > self.cap {
+            return Err(BookError::Full);
+        }
+
         if let Some(tail_id) = tail {
             let tail_node = self
                 .arena
@@ -315,6 +416,7 @@ impl Book {
         level.count = next_count;
         level.quantity = next_quantity;
         self.locations.insert(order_id, node_id);
+        self.total_quantity = next_total_quantity;
         Ok(())
     }
 
@@ -356,6 +458,10 @@ impl Book {
             .ok_or(BookError::Invariant(
                 "fill exceeds aggregate price level quantity",
             ))?;
+        let next_total_quantity = self
+            .total_quantity
+            .checked_sub(quantity)
+            .ok_or(BookError::Invariant("fill exceeds aggregate book quantity"))?;
 
         self.arena
             .get_mut(node_id)
@@ -369,6 +475,7 @@ impl Book {
                 "validated maker price level is missing",
             ))?
             .quantity = next_level_quantity;
+        self.total_quantity = next_total_quantity;
         if fully_filled {
             self.remove_resting(node_id)?;
         }
@@ -566,6 +673,7 @@ mod tests {
     /// the arena's live-node count.
     fn assert_invariants(book: &Book) {
         let mut live = 0usize;
+        let mut total_quantity = Quantity::from(0);
         for (side, levels) in [(OrderSide::Buy, &book.bids), (OrderSide::Sell, &book.asks)] {
             for (&price, level) in levels {
                 assert!(level.count > 0, "empty level retained at {price:?}");
@@ -602,6 +710,9 @@ mod tests {
                     aggregate, level.quantity,
                     "level quantity disagrees with the walk"
                 );
+                total_quantity = total_quantity
+                    .checked_add(level.quantity)
+                    .expect("aggregate book quantity overflow");
                 live += walked;
             }
         }
@@ -615,6 +726,10 @@ mod tests {
             live,
             book.arena.live_count(),
             "arena live count disagrees with live nodes"
+        );
+        assert_eq!(
+            total_quantity, book.total_quantity,
+            "cached book quantity disagrees with price levels"
         );
     }
 
@@ -924,5 +1039,71 @@ mod tests {
 
         assert_eq!(report.trades.len(), 1);
         assert_eq!(report.trades[0].maker_id, report.trades[0].taker_id);
+    }
+
+    #[test]
+    fn configured_book_enforces_tick_lot_and_max_quantity() {
+        let mut book = Book::with_config(
+            4,
+            TickSize::from(5),
+            LotSize::from(10),
+            100,
+            Quantity::from(50),
+        );
+
+        assert_eq!(
+            submit(&mut book, limit(1, OrderSide::Buy, 101, 10), 1),
+            Err(BookError::InvalidConfiguration(
+                "limit price must be a multiple of tick size"
+            ))
+        );
+        assert_eq!(
+            submit(&mut book, limit(2, OrderSide::Buy, 100, 11), 2),
+            Err(BookError::InvalidConfiguration(
+                "order quantity must be a multiple of lot size"
+            ))
+        );
+        assert_eq!(
+            submit(&mut book, limit(3, OrderSide::Buy, 100, 60), 3),
+            Err(BookError::InvalidConfiguration(
+                "order quantity exceeds maximum order quantity"
+            ))
+        );
+    }
+
+    #[test]
+    fn configured_book_enforces_aggregate_quantity_cap() {
+        let mut book = Book::with_config(
+            4,
+            TickSize::from(1),
+            LotSize::from(1),
+            10,
+            Quantity::from(20),
+        );
+        submit(&mut book, limit(1, OrderSide::Buy, 100, 10), 1).unwrap();
+
+        assert_eq!(
+            submit(&mut book, limit(2, OrderSide::Buy, 99, 1), 2),
+            Err(BookError::Full)
+        );
+    }
+
+    #[test]
+    fn invalid_configuration_is_rejected() {
+        assert_eq!(
+            Book::try_with_config(4, TickSize::from(0), LotSize::from(1), 0, Quantity::from(1))
+                .unwrap_err(),
+            BookError::InvalidConfiguration("tick size must be positive")
+        );
+        assert_eq!(
+            Book::try_with_config(4, TickSize::from(1), LotSize::from(0), 0, Quantity::from(1))
+                .unwrap_err(),
+            BookError::InvalidConfiguration("lot size must be positive")
+        );
+        assert_eq!(
+            Book::try_with_config(4, TickSize::from(1), LotSize::from(1), 0, Quantity::from(0))
+                .unwrap_err(),
+            BookError::InvalidConfiguration("maximum order quantity must be positive")
+        );
     }
 }
