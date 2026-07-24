@@ -1,8 +1,10 @@
+mod instrument;
 mod order;
 mod trade;
 
 use std::fmt;
 
+pub use instrument::{Instrument, InstrumentId};
 pub use order::{Order, OrderError, OrderKind, OrderSide, RestingOrder};
 pub use trade::Trade;
 
@@ -40,6 +42,18 @@ pub struct Price(pub i64);
 #[serde(transparent)]
 pub struct Quantity(pub u64);
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct LotSize(pub u64);
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct TickSize(pub u32);
+
 impl fmt::Display for OrderId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
@@ -69,10 +83,6 @@ impl Sequence {
             None => None,
         }
     }
-
-    pub const fn from(u: u64) -> Self {
-        Self(u)
-    }
 }
 
 impl Price {
@@ -84,10 +94,6 @@ impl Price {
 impl Quantity {
     pub const fn into_inner(self) -> u64 {
         self.0
-    }
-
-    pub const fn from(u: u64) -> Self {
-        Self(u)
     }
 
     pub const fn checked_sub(self, rhs: Self) -> Option<Self> {
@@ -161,6 +167,30 @@ impl From<u64> for Quantity {
 
 impl From<Quantity> for u64 {
     fn from(value: Quantity) -> Self {
+        value.0
+    }
+}
+
+impl From<u64> for LotSize {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl From<LotSize> for u64 {
+    fn from(value: LotSize) -> Self {
+        value.0
+    }
+}
+
+impl From<u32> for TickSize {
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+impl From<TickSize> for u32 {
+    fn from(value: TickSize) -> Self {
         value.0
     }
 }

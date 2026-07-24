@@ -551,7 +551,11 @@ mod tests {
 
     /// Submits at an explicit sequence and asserts the book's structural
     /// invariants still hold afterwards, regardless of success or failure.
-    fn submit(book: &mut Book, incoming: Order, sequence: u64) -> Result<ExecutionReport, BookError> {
+    fn submit(
+        book: &mut Book,
+        incoming: Order,
+        sequence: u64,
+    ) -> Result<ExecutionReport, BookError> {
         let result = book.submit(incoming, Sequence::from(sequence));
         assert_invariants(book);
         result
@@ -562,10 +566,7 @@ mod tests {
     /// the arena's live-node count.
     fn assert_invariants(book: &Book) {
         let mut live = 0usize;
-        for (side, levels) in [
-            (OrderSide::Buy, &book.bids),
-            (OrderSide::Sell, &book.asks),
-        ] {
+        for (side, levels) in [(OrderSide::Buy, &book.bids), (OrderSide::Sell, &book.asks)] {
             for (&price, level) in levels {
                 assert!(level.count > 0, "empty level retained at {price:?}");
                 assert!(
@@ -597,13 +598,24 @@ mod tests {
 
                 assert_eq!(prev, level.tail, "walk did not terminate at the tail");
                 assert_eq!(walked, level.count, "level count disagrees with the walk");
-                assert_eq!(aggregate, level.quantity, "level quantity disagrees with the walk");
+                assert_eq!(
+                    aggregate, level.quantity,
+                    "level quantity disagrees with the walk"
+                );
                 live += walked;
             }
         }
 
-        assert_eq!(live, book.locations.len(), "locations size disagrees with live nodes");
-        assert_eq!(live, book.arena.live_count(), "arena live count disagrees with live nodes");
+        assert_eq!(
+            live,
+            book.locations.len(),
+            "locations size disagrees with live nodes"
+        );
+        assert_eq!(
+            live,
+            book.arena.live_count(),
+            "arena live count disagrees with live nodes"
+        );
     }
 
     /// A convenience projection of a report's fills for order-sensitive asserts.
@@ -630,7 +642,10 @@ mod tests {
         assert!(report.trades.is_empty());
         assert_eq!(report.remaining_quantity, Quantity::from(5));
         assert_eq!(book.locations.len(), 1);
-        assert_eq!(book.bids.get(&Price::from(100)).unwrap().quantity, Quantity::from(5));
+        assert_eq!(
+            book.bids.get(&Price::from(100)).unwrap().quantity,
+            Quantity::from(5)
+        );
     }
 
     #[test]
@@ -658,7 +673,10 @@ mod tests {
         assert_eq!(report.remaining_quantity, Quantity::from(5));
         // The 5-lot remainder rests on the bid side at its own limit price.
         assert!(book.asks.is_empty());
-        assert_eq!(book.bids.get(&Price::from(100)).unwrap().quantity, Quantity::from(5));
+        assert_eq!(
+            book.bids.get(&Price::from(100)).unwrap().quantity,
+            Quantity::from(5)
+        );
     }
 
     #[test]
@@ -670,7 +688,10 @@ mod tests {
 
         assert_eq!(fills(&report), vec![(OrderId::from(1), 4, 100)]);
         assert_eq!(report.remaining_quantity, Quantity::from(0));
-        assert_eq!(book.asks.get(&Price::from(100)).unwrap().quantity, Quantity::from(6));
+        assert_eq!(
+            book.asks.get(&Price::from(100)).unwrap().quantity,
+            Quantity::from(6)
+        );
         assert!(book.bids.is_empty());
     }
 
@@ -687,7 +708,10 @@ mod tests {
             fills(&report),
             vec![(OrderId::from(1), 5, 100), (OrderId::from(2), 2, 100)]
         );
-        assert_eq!(book.asks.get(&Price::from(100)).unwrap().quantity, Quantity::from(3));
+        assert_eq!(
+            book.asks.get(&Price::from(100)).unwrap().quantity,
+            Quantity::from(3)
+        );
     }
 
     #[test]
@@ -703,7 +727,10 @@ mod tests {
             fills(&report),
             vec![(OrderId::from(2), 2, 100), (OrderId::from(1), 2, 101)]
         );
-        assert_eq!(book.asks.get(&Price::from(101)).unwrap().quantity, Quantity::from(1));
+        assert_eq!(
+            book.asks.get(&Price::from(101)).unwrap().quantity,
+            Quantity::from(1)
+        );
     }
 
     #[test]
@@ -729,8 +756,14 @@ mod tests {
 
         assert!(report.trades.is_empty());
         assert_eq!(report.remaining_quantity, Quantity::from(5));
-        assert_eq!(book.asks.get(&Price::from(101)).unwrap().quantity, Quantity::from(5));
-        assert_eq!(book.bids.get(&Price::from(100)).unwrap().quantity, Quantity::from(5));
+        assert_eq!(
+            book.asks.get(&Price::from(101)).unwrap().quantity,
+            Quantity::from(5)
+        );
+        assert_eq!(
+            book.bids.get(&Price::from(100)).unwrap().quantity,
+            Quantity::from(5)
+        );
     }
 
     #[test]
@@ -786,7 +819,10 @@ mod tests {
 
         let result = submit(&mut book, limit(1, OrderSide::Buy, 100, 0), 1);
 
-        assert_eq!(result, Err(BookError::InvalidOrder(OrderError::ZeroQuantity)));
+        assert_eq!(
+            result,
+            Err(BookError::InvalidOrder(OrderError::ZeroQuantity))
+        );
         assert_eq!(book.locations.len(), 0);
     }
 
@@ -872,11 +908,19 @@ mod tests {
         // Documents present behavior: the book has no self-trade prevention,
         // so a user may match against their own resting order.
         let mut book = Book::new(4);
-        submit(&mut book, order(1, 7, OrderSide::Sell, OrderKind::Limit, Some(100), 5), 1).unwrap();
+        submit(
+            &mut book,
+            order(1, 7, OrderSide::Sell, OrderKind::Limit, Some(100), 5),
+            1,
+        )
+        .unwrap();
 
-        let report =
-            submit(&mut book, order(2, 7, OrderSide::Buy, OrderKind::Limit, Some(100), 5), 2)
-                .unwrap();
+        let report = submit(
+            &mut book,
+            order(2, 7, OrderSide::Buy, OrderKind::Limit, Some(100), 5),
+            2,
+        )
+        .unwrap();
 
         assert_eq!(report.trades.len(), 1);
         assert_eq!(report.trades[0].maker_id, report.trades[0].taker_id);
