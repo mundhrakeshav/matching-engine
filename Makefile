@@ -1,21 +1,29 @@
-.PHONY: build run test tidy clean
+.DEFAULT_GOAL := help
 
-BINARY := ob
+.PHONY: help build run run-local test fmt lint check clean
 
-build:
-	go build -o bin/$(BINARY) ./cmd/$(BINARY)
+help:
+	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ {printf "%-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-run:
-	go run ./cmd/$(BINARY)
+build: ## Build the optimized release binary.
+	cargo build --release
 
-run-local:
-	ENV=local go run ./cmd/$(BINARY)
+run: ## Run with the current environment.
+	cargo run
 
-test:
-	go test ./...
+run-local: ## Load .env and run locally.
+	ENV=local cargo run
 
-tidy:
-	go mod tidy
+test: ## Run all tests.
+	cargo test
 
-clean:
-	rm -rf bin/
+fmt: ## Verify Rust formatting.
+	cargo fmt --check
+
+lint: ## Run strict Clippy checks.
+	cargo clippy --all-targets --all-features -- -D warnings
+
+check: fmt lint test ## Run all local quality checks.
+
+clean: ## Remove Cargo build artifacts.
+	cargo clean
