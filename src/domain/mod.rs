@@ -2,7 +2,6 @@ mod order;
 mod trade;
 
 use std::fmt;
-use std::ops::{AddAssign, SubAssign};
 
 pub use order::{Order, OrderError, OrderKind, OrderSide, RestingOrder};
 pub use trade::Trade;
@@ -97,17 +96,12 @@ impl Quantity {
             None => None,
         }
     }
-}
 
-impl AddAssign for Quantity {
-    fn add_assign(&mut self, rhs: Self) {
-        self.0 += rhs.0;
-    }
-}
-
-impl SubAssign for Quantity {
-    fn sub_assign(&mut self, rhs: Self) {
-        self.0 -= rhs.0;
+    pub const fn checked_add(self, rhs: Self) -> Option<Self> {
+        match self.0.checked_add(rhs.0) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
     }
 }
 

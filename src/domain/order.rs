@@ -33,8 +33,6 @@ pub struct Order {
     pub limit_price: Option<Price>,
     pub kind: OrderKind,
     pub side: OrderSide,
-    #[serde(default)]
-    pub allow_partial: bool,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

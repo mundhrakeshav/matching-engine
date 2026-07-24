@@ -1,6 +1,6 @@
-use crate::domain::{Order, OrderId, Sequence};
+use crate::domain::{Order, Sequence};
 
-use super::{Book, BookError, ExecutionReport, OrderBookSnapshot};
+use super::{Book, BookError, ExecutionReport};
 
 /// The sole command boundary. Every accepted order receives one monotonic sequence.
 #[derive(Debug)]
@@ -24,29 +24,12 @@ impl Engine {
     /// Returns an error when the sequence space is exhausted or the book rejects
     /// the order.
     pub fn submit(&mut self, order: Order) -> Result<ExecutionReport, BookError> {
-        self.sequence = self
+        let next_sequence = self
             .sequence
             .checked_add(1)
             .ok_or(BookError::SequenceExhausted)?;
-        order.validate()?;
-        self.book.submit(order, self.sequence)
-    }
-
-    /// Applies one cancellation at the next deterministic sequence.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sequence space is exhausted or the order is not
-    /// currently resting.
-    pub fn cancel(&mut self, order_id: OrderId) -> Result<(), BookError> {
-        self.sequence = self
-            .sequence
-            .checked_add(1)
-            .ok_or(BookError::SequenceExhausted)?;
-        self.book.cancel(order_id)
-    }
-
-    pub fn snapshot(&self) -> OrderBookSnapshot {
-        self.book.snapshot(self.sequence)
+        let report = self.book.submit(order, next_sequence)?;
+        self.sequence = next_sequence;
+        Ok(report)
     }
 }
