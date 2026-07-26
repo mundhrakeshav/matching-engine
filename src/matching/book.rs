@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 
 use crate::domain::{
-    LotSize, Order, OrderError, OrderId, OrderKind, OrderSide, Price, Quantity, Sequence, TickSize,
-    Trade,
+    LotSize, Order, OrderError, OrderId, OrderKind, OrderSide, OrderStatus, Price, Quantity,
+    Sequence, TickSize, Trade,
 };
 
 use super::arena::{Arena, ArenaError, NodeId};
@@ -28,6 +28,7 @@ struct PriceLevel {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ExecutionReport {
     pub order_id: OrderId,
+    pub status: OrderStatus,
     pub remaining_quantity: Quantity,
     pub trades: Vec<Trade>,
 }
@@ -112,7 +113,8 @@ impl Book {
         }
     }
 
-    /// Matches an order and rests any eligible unfilled limit remainder.
+    /// Matches an admitted order and rests any eligible unfilled limit
+    /// remainder.
     ///
     /// `submit` owns the matching loop. Each iteration computes one read-only
     /// fill plan, validates it against current state, and applies only that
@@ -120,19 +122,20 @@ impl Book {
     ///
     /// # Errors
     ///
-    /// Returns an error for invalid or duplicate orders, an exhausted engine
-    /// sequence, or a book with no room to rest the unfilled remainder.
-    pub fn submit(
+    /// Returns an error if an internal invariant fails while applying an order
+    /// that [`Engine`](super::Engine) has already validated and sequenced.
+    pub(super) fn submit(
         &mut self,
         mut order: Order,
-        sequence: Sequence,
+        command_sequence: Sequence,
     ) -> Result<ExecutionReport, BookError> {
-        order.validate()?;
-        self.validate_order_constraints(&order)?;
-
-        if self.locations.contains_key(&order.resting.id) {
-            return Err(BookError::DuplicateOrder(order.resting.id));
+        if order.resting.status != OrderStatus::New {
+            return Err(BookError::Invariant(
+                "book received an admitted order that was not new",
+            ));
         }
+        order.resting.accepted_sequence = command_sequence;
+        order.resting.status = OrderStatus::Accepted;
 
         // Allocate 5 once to void re allocating if more needed
         let mut trades = Vec::with_capacity(5);
@@ -142,29 +145,36 @@ impl Book {
                 break;
             };
             self.validate(&order, &fill)?;
-            trades.push(self.apply(&mut order, fill, sequence)?);
+            trades.push(self.apply(&mut order, fill, command_sequence)?);
         }
 
         if order.resting.open_qty > Quantity::from(0) && order.kind == OrderKind::Limit {
             self.rest(order.clone())?;
+        } else if order.resting.open_qty > Quantity::from(0) {
+            order.resting.status = OrderStatus::Cancelled;
         }
 
         Ok(ExecutionReport {
             order_id: order.resting.id,
+            status: order.resting.status,
             remaining_quantity: order.resting.open_qty,
             trades,
         })
     }
 
-    fn validate_order_constraints(&self, order: &Order) -> Result<(), BookError> {
+    pub(super) fn validate_order_constraints(&self, order: &Order) -> Result<(), BookError> {
         if order.resting.original_qty > self.max_order_quantity {
             return Err(BookError::InvalidConfiguration(
                 "order quantity exceeds maximum order quantity",
             ));
         }
         let lot_size: u64 = self.lot_size.into();
-        if order.resting.original_qty.into_inner() % lot_size != 0
-            || order.resting.open_qty.into_inner() % lot_size != 0
+        if !order
+            .resting
+            .original_qty
+            .into_inner()
+            .is_multiple_of(lot_size)
+            || !order.resting.open_qty.into_inner().is_multiple_of(lot_size)
         {
             return Err(BookError::InvalidConfiguration(
                 "order quantity must be a multiple of lot size",
@@ -182,6 +192,110 @@ impl Book {
             }
         }
         Ok(())
+    }
+
+    pub(super) fn validate_order_id_available(&self, order_id: OrderId) -> Result<(), BookError> {
+        if self.locations.contains_key(&order_id) {
+            return Err(BookError::DuplicateOrder(order_id));
+        }
+        Ok(())
+    }
+
+    /// Checks whether the post-match limit remainder can rest without mutating
+    /// the book. Rejections must happen before the first fill is applied.
+    pub(super) fn validate_resting_capacity(&self, order: &Order) -> Result<(), BookError> {
+        if order.kind == OrderKind::Market {
+            return Ok(());
+        }
+
+        let (remaining, fully_consumed_makers) = self.preview_match(order)?;
+        if remaining == Quantity::from(0) {
+            return Ok(());
+        }
+
+        if fully_consumed_makers == 0 && !self.arena.has_capacity() {
+            return Err(BookError::Full);
+        }
+
+        let matched = order
+            .resting
+            .open_qty
+            .checked_sub(remaining)
+            .ok_or(BookError::Invariant(
+                "preview remainder exceeds incoming quantity",
+            ))?;
+        let post_match_total =
+            self.total_quantity
+                .checked_sub(matched)
+                .ok_or(BookError::Invariant(
+                    "preview fill exceeds aggregate book quantity",
+                ))?;
+        let next_total_quantity = post_match_total
+            .checked_add(remaining)
+            .ok_or(BookError::QuantityOverflow)?;
+        if self.cap > 0 && next_total_quantity.into_inner() > self.cap {
+            return Err(BookError::Full);
+        }
+        Ok(())
+    }
+
+    /// Computes the incoming remainder and number of makers that would leave
+    /// the arena, preserving price-time order without mutating either order.
+    fn preview_match(&self, order: &Order) -> Result<(Quantity, usize), BookError> {
+        let mut remaining = order.resting.open_qty;
+        let mut fully_consumed_makers = 0usize;
+        let maker_side = match order.side {
+            OrderSide::Buy => OrderSide::Sell,
+            OrderSide::Sell => OrderSide::Buy,
+        };
+        let levels = self.levels(maker_side);
+
+        let mut visit_level = |price: Price, level: &PriceLevel| -> Result<bool, BookError> {
+            if !order.crosses(price) {
+                return Ok(false);
+            }
+
+            let mut cursor = level.head;
+            while let Some(node_id) = cursor {
+                let node = self
+                    .arena
+                    .get(node_id)
+                    .map_err(|_| BookError::Invariant("previewed maker node was released"))?;
+                let fill = remaining.min(node.order.resting.open_qty);
+                remaining = remaining.checked_sub(fill).ok_or(BookError::Invariant(
+                    "previewed fill exceeds incoming quantity",
+                ))?;
+                if fill == node.order.resting.open_qty {
+                    fully_consumed_makers = fully_consumed_makers
+                        .checked_add(1)
+                        .ok_or(BookError::Invariant("previewed maker count overflow"))?;
+                }
+                if remaining == Quantity::from(0) {
+                    return Ok(false);
+                }
+                cursor = node.next;
+            }
+            Ok(true)
+        };
+
+        match order.side {
+            OrderSide::Buy => {
+                for (&price, level) in levels {
+                    if !visit_level(price, level)? {
+                        break;
+                    }
+                }
+            }
+            OrderSide::Sell => {
+                for (&price, level) in levels.iter().rev() {
+                    if !visit_level(price, level)? {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok((remaining, fully_consumed_makers))
     }
 
     /// Returns the next fill without mutating the book or taker.
@@ -302,6 +416,7 @@ impl Book {
             quantity: fill.quantity,
             price: fill.price,
         };
+
         taker.resting.open_qty =
             taker
                 .resting
@@ -310,7 +425,72 @@ impl Book {
                 .ok_or(BookError::Invariant(
                     "planned fill exceeds the taker quantity during apply",
                 ))?;
-        self.apply_maker_fill(taker.side, fill.maker_node_id, fill.price, fill.quantity)?;
+
+        taker.resting.status = if taker.resting.open_qty == Quantity::from(0) {
+            OrderStatus::Filled
+        } else {
+            OrderStatus::PartiallyFilled
+        };
+
+        let maker_open_quantity = self
+            .arena
+            .get(fill.maker_node_id)
+            .map_err(|_| BookError::Invariant("planned maker node was released"))?
+            .order
+            .resting
+            .open_qty;
+
+        let next_maker_quantity =
+            maker_open_quantity
+                .checked_sub(fill.quantity)
+                .ok_or(BookError::Invariant(
+                    "fill quantity exceeds maker open quantity",
+                ))?;
+
+        let maker_fully_filled = next_maker_quantity == Quantity::from(0);
+
+        let maker_side = match taker.side {
+            OrderSide::Buy => OrderSide::Sell,
+            OrderSide::Sell => OrderSide::Buy,
+        };
+
+        let next_level_quantity = self
+            .levels(maker_side)
+            .get(&fill.price)
+            .ok_or(BookError::Invariant("maker price level is missing"))?
+            .quantity
+            .checked_sub(fill.quantity)
+            .ok_or(BookError::Invariant(
+                "fill exceeds aggregate price level quantity",
+            ))?;
+        let next_total_quantity = self
+            .total_quantity
+            .checked_sub(fill.quantity)
+            .ok_or(BookError::Invariant("fill exceeds aggregate book quantity"))?;
+
+        let maker = &mut self
+            .arena
+            .get_mut(fill.maker_node_id)
+            .map_err(|_| BookError::Invariant("validated maker node was released"))?
+            .order
+            .resting;
+        maker.open_qty = next_maker_quantity;
+        maker.status = if maker_fully_filled {
+            OrderStatus::Filled
+        } else {
+            OrderStatus::PartiallyFilled
+        };
+        self.levels_mut(maker_side)
+            .get_mut(&fill.price)
+            .ok_or(BookError::Invariant(
+                "validated maker price level is missing",
+            ))?
+            .quantity = next_level_quantity;
+        self.total_quantity = next_total_quantity;
+        if maker_fully_filled {
+            self.remove_resting(fill.maker_node_id)?;
+        }
+
         Ok(trade)
     }
 
@@ -392,68 +572,6 @@ impl Book {
         Ok(())
     }
 
-    fn apply_maker_fill(
-        &mut self,
-        taker_side: OrderSide,
-        node_id: NodeId,
-        price: Price,
-        quantity: Quantity,
-    ) -> Result<(), BookError> {
-        let maker_open_quantity = self
-            .arena
-            .get(node_id)
-            .map_err(|_| BookError::Invariant("planned maker node was released"))?
-            .order
-            .resting
-            .open_qty;
-
-        let next_maker_quantity =
-            maker_open_quantity
-                .checked_sub(quantity)
-                .ok_or(BookError::Invariant(
-                    "fill quantity exceeds maker open quantity",
-                ))?;
-
-        let fully_filled = next_maker_quantity == Quantity::from(0);
-
-        let maker_side = match taker_side {
-            OrderSide::Buy => OrderSide::Sell,
-            OrderSide::Sell => OrderSide::Buy,
-        };
-
-        let next_level_quantity = self
-            .levels(maker_side)
-            .get(&price)
-            .ok_or(BookError::Invariant("maker price level is missing"))?
-            .quantity
-            .checked_sub(quantity)
-            .ok_or(BookError::Invariant(
-                "fill exceeds aggregate price level quantity",
-            ))?;
-        let next_total_quantity = self
-            .total_quantity
-            .checked_sub(quantity)
-            .ok_or(BookError::Invariant("fill exceeds aggregate book quantity"))?;
-
-        self.arena
-            .get_mut(node_id)
-            .map_err(|_| BookError::Invariant("validated maker node was released"))?
-            .order
-            .resting
-            .open_qty = next_maker_quantity;
-        self.levels_mut(maker_side)
-            .get_mut(&price)
-            .ok_or(BookError::Invariant(
-                "validated maker price level is missing",
-            ))?
-            .quantity = next_level_quantity;
-        self.total_quantity = next_total_quantity;
-        if fully_filled {
-            self.remove_resting(node_id)?;
-        }
-        Ok(())
-    }
-
     /// Removes a resting order and returns it.
     ///
     /// # Errors
@@ -465,13 +583,14 @@ impl Book {
             .locations
             .get(&order_id)
             .ok_or(BookError::OrderNotFound(order_id))?;
-        let order = self
+        let mut order = self
             .arena
             .get(node_id)
             .map_err(|_| BookError::Invariant("removed order node was released"))?
             .order
             .clone();
         self.remove_resting(node_id)?;
+        order.resting.status = OrderStatus::Cancelled;
         Ok(order)
     }
 
@@ -642,7 +761,7 @@ impl Book {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{OrderId, RestingOrder, UserId};
+    use crate::domain::{OrderId, OrderStatus, RestingOrder, UserId};
 
     fn order(
         id: u64,
@@ -659,6 +778,7 @@ mod tests {
                 original_qty: Quantity::from(qty),
                 open_qty: Quantity::from(qty),
                 accepted_sequence: Sequence::from(0),
+                status: OrderStatus::New,
             },
             limit_price: price.map(Price::from),
             kind,
@@ -681,7 +801,13 @@ mod tests {
         incoming: Order,
         sequence: u64,
     ) -> Result<ExecutionReport, BookError> {
-        let result = book.submit(incoming, Sequence::from(sequence));
+        let result = incoming
+            .validate()
+            .map_err(BookError::from)
+            .and_then(|()| book.validate_order_constraints(&incoming))
+            .and_then(|()| book.validate_order_id_available(incoming.resting.id))
+            .and_then(|()| book.validate_resting_capacity(&incoming))
+            .and_then(|()| book.submit(incoming, Sequence::from(sequence)));
         assert_invariants(book);
         result
     }
@@ -773,8 +899,13 @@ mod tests {
         let report = submit(&mut book, limit(1, OrderSide::Buy, 100, 5), 1).unwrap();
 
         assert!(report.trades.is_empty());
+        assert_eq!(report.status, OrderStatus::Accepted);
         assert_eq!(report.remaining_quantity, Quantity::from(5));
         assert_eq!(book.locations.len(), 1);
+        let node_id = book.locations[&OrderId::from(1)];
+        let resting = &book.arena.get(node_id).unwrap().order.resting;
+        assert_eq!(resting.accepted_sequence, Sequence::from(1));
+        assert_eq!(resting.status, OrderStatus::Accepted);
         assert_eq!(
             book.bids.get(&Price::from(100)).unwrap().quantity,
             Quantity::from(5)
@@ -788,6 +919,7 @@ mod tests {
 
         let report = submit(&mut book, limit(2, OrderSide::Buy, 100, 5), 2).unwrap();
 
+        assert_eq!(report.status, OrderStatus::Filled);
         assert_eq!(report.remaining_quantity, Quantity::from(0));
         assert_eq!(fills(&report), vec![(OrderId::from(1), 5, 100)]);
         // Maker fully filled and the taker fully filled: nothing rests.
@@ -803,6 +935,7 @@ mod tests {
         let report = submit(&mut book, limit(2, OrderSide::Buy, 100, 8), 2).unwrap();
 
         assert_eq!(fills(&report), vec![(OrderId::from(1), 3, 100)]);
+        assert_eq!(report.status, OrderStatus::PartiallyFilled);
         assert_eq!(report.remaining_quantity, Quantity::from(5));
         // The 5-lot remainder rests on the bid side at its own limit price.
         assert!(book.asks.is_empty());
@@ -907,6 +1040,7 @@ mod tests {
         let report = submit(&mut book, market(2, OrderSide::Buy, 8), 2).unwrap();
 
         assert_eq!(fills(&report), vec![(OrderId::from(1), 3, 100)]);
+        assert_eq!(report.status, OrderStatus::Cancelled);
         // Remainder is discarded, not rested: market orders leave no trace.
         assert_eq!(report.remaining_quantity, Quantity::from(5));
         assert!(book.asks.is_empty() && book.bids.is_empty());
@@ -920,6 +1054,7 @@ mod tests {
         let report = submit(&mut book, market(1, OrderSide::Buy, 5), 1).unwrap();
 
         assert!(report.trades.is_empty());
+        assert_eq!(report.status, OrderStatus::Cancelled);
         assert_eq!(report.remaining_quantity, Quantity::from(5));
         assert_eq!(book.locations.len(), 0);
     }
@@ -1106,6 +1241,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn capacity_rejection_after_previewed_fill_does_not_mutate_makers() {
+        let mut book = Book::with_config(
+            4,
+            TickSize::from(1),
+            LotSize::from(1),
+            10,
+            Quantity::from(20),
+        );
+        submit(&mut book, limit(1, OrderSide::Buy, 99, 8), 1).unwrap();
+        submit(&mut book, limit(2, OrderSide::Sell, 100, 2), 2).unwrap();
+
+        let result = submit(&mut book, limit(3, OrderSide::Buy, 100, 5), 3);
+
+        assert_eq!(result, Err(BookError::Full));
+        assert_eq!(book.total_quantity, Quantity::from(10));
+        assert_eq!(
+            book.asks.get(&Price::from(100)).unwrap().quantity,
+            Quantity::from(2)
+        );
+        assert_eq!(
+            book.bids.get(&Price::from(99)).unwrap().quantity,
+            Quantity::from(8)
+        );
+    }
+
     /// Cancels an order and asserts the book's structural invariants still
     /// hold afterwards, regardless of success or failure.
     fn cancel(book: &mut Book, order_id: OrderId) -> Result<Order, BookError> {
@@ -1123,6 +1284,7 @@ mod tests {
 
         assert_eq!(cancelled.resting.id, OrderId::from(1));
         assert_eq!(cancelled.resting.open_qty, Quantity::from(5));
+        assert_eq!(cancelled.resting.status, OrderStatus::Cancelled);
         assert!(book.bids.is_empty());
         assert_eq!(book.locations.len(), 0);
     }

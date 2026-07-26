@@ -1,8 +1,9 @@
 use ob::{
     domain::{
-        Order, OrderId, OrderKind, OrderSide, Price, Quantity, RestingOrder, Sequence, UserId,
+        Order, OrderError, OrderId, OrderKind, OrderSide, OrderStatus, Price, Quantity,
+        RestingOrder, Sequence, UserId,
     },
-    matching::{BookError, Engine},
+    matching::{Engine, ExecutionReport, RejectReason, SubmitOutcome},
 };
 
 fn limit(id: u64, side: OrderSide, price: i64, quantity: u64) -> Order {
@@ -13,6 +14,7 @@ fn limit(id: u64, side: OrderSide, price: i64, quantity: u64) -> Order {
             original_qty: Quantity::from(quantity),
             open_qty: Quantity::from(quantity),
             accepted_sequence: Sequence::from(0),
+            status: OrderStatus::New,
         },
         limit_price: Some(Price::from(price)),
         kind: OrderKind::Limit,
@@ -28,6 +30,7 @@ fn market(id: u64, side: OrderSide, quantity: u64) -> Order {
             original_qty: Quantity::from(quantity),
             open_qty: Quantity::from(quantity),
             accepted_sequence: Sequence::from(0),
+            status: OrderStatus::New,
         },
         limit_price: None,
         kind: OrderKind::Market,
@@ -35,13 +38,21 @@ fn market(id: u64, side: OrderSide, quantity: u64) -> Order {
     }
 }
 
+fn accepted(engine: &mut Engine, order: Order) -> ExecutionReport {
+    match engine.submit(order).expect("submission must not fault") {
+        SubmitOutcome::Accepted(report) => report,
+        SubmitOutcome::Rejected(report) => panic!("order was rejected: {:?}", report.reason),
+    }
+}
+
 #[test]
 fn price_time_priority_and_maker_price_are_preserved() {
     let mut engine = Engine::new(10);
-    engine.submit(limit(1, OrderSide::Sell, 100, 5)).unwrap();
-    engine.submit(limit(2, OrderSide::Sell, 100, 5)).unwrap();
-    let report = engine.submit(limit(3, OrderSide::Buy, 101, 7)).unwrap();
+    accepted(&mut engine, limit(1, OrderSide::Sell, 100, 5));
+    accepted(&mut engine, limit(2, OrderSide::Sell, 100, 5));
+    let report = accepted(&mut engine, limit(3, OrderSide::Buy, 101, 7));
 
+    assert_eq!(report.status, OrderStatus::Filled);
     assert_eq!(report.remaining_quantity, Quantity::from(0));
     assert_eq!(
         report
@@ -54,15 +65,21 @@ fn price_time_priority_and_maker_price_are_preserved() {
             (OrderId::from(2), Quantity::from(2), Price::from(100)),
         ]
     );
+    assert!(
+        report
+            .trades
+            .iter()
+            .all(|trade| trade.sequence == Sequence::from(3))
+    );
 }
 
 #[test]
 fn submit_replans_after_each_fill_across_price_levels() {
     let mut engine = Engine::new(10);
-    engine.submit(limit(1, OrderSide::Sell, 100, 2)).unwrap();
-    engine.submit(limit(2, OrderSide::Sell, 101, 3)).unwrap();
+    accepted(&mut engine, limit(1, OrderSide::Sell, 100, 2));
+    accepted(&mut engine, limit(2, OrderSide::Sell, 101, 3));
 
-    let report = engine.submit(limit(3, OrderSide::Buy, 102, 4)).unwrap();
+    let report = accepted(&mut engine, limit(3, OrderSide::Buy, 102, 4));
 
     assert_eq!(
         report
@@ -81,17 +98,11 @@ fn submit_replans_after_each_fill_across_price_levels() {
 fn unmatched_limit_order_rests_but_market_order_does_not() {
     let mut engine = Engine::new(10);
     assert_eq!(
-        engine
-            .submit(limit(1, OrderSide::Buy, 99, 4))
-            .unwrap()
-            .remaining_quantity,
+        accepted(&mut engine, limit(1, OrderSide::Buy, 99, 4)).remaining_quantity,
         Quantity::from(4)
     );
     assert_eq!(
-        engine
-            .submit(market(2, OrderSide::Sell, 10))
-            .unwrap()
-            .remaining_quantity,
+        accepted(&mut engine, market(2, OrderSide::Sell, 10)).remaining_quantity,
         Quantity::from(6)
     );
 }
@@ -102,36 +113,62 @@ fn rejected_submit_does_not_partially_apply_fills() {
 
     let result = engine.submit(limit(1, OrderSide::Buy, 101, 7));
 
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Ok(SubmitOutcome::Rejected(report))
+            if report.status == OrderStatus::Rejected
+                && report.reason == RejectReason::BookFull
+    ));
+}
+
+#[test]
+fn invalid_order_is_a_rejected_outcome_not_an_engine_fault() {
+    let mut engine = Engine::new(1);
+
+    let result = engine.submit(limit(7, OrderSide::Buy, 101, 0));
+
+    assert!(matches!(
+        result,
+        Ok(SubmitOutcome::Rejected(report))
+            if report.order_id == OrderId::from(7)
+                && report.status == OrderStatus::Rejected
+                && report.reason
+                    == RejectReason::InvalidOrder(OrderError::ZeroQuantity)
+    ));
 }
 
 #[test]
 fn capacity_remains_enforced_after_reusing_a_released_slot() {
     let mut engine = Engine::new(1);
-    engine.submit(limit(1, OrderSide::Sell, 100, 1)).unwrap();
-    engine.submit(market(2, OrderSide::Buy, 1)).unwrap();
-    engine.submit(limit(3, OrderSide::Sell, 100, 1)).unwrap();
+    accepted(&mut engine, limit(1, OrderSide::Sell, 100, 1));
+    accepted(&mut engine, market(2, OrderSide::Buy, 1));
+    accepted(&mut engine, limit(3, OrderSide::Sell, 100, 1));
 
     let result = engine.submit(limit(4, OrderSide::Sell, 101, 1));
 
-    assert_eq!(result, Err(BookError::Full));
+    assert!(matches!(
+        result,
+        Ok(SubmitOutcome::Rejected(report)) if report.reason == RejectReason::BookFull
+    ));
 
-    engine.submit(market(5, OrderSide::Buy, 1)).unwrap();
-    engine.submit(limit(6, OrderSide::Sell, 100, 1)).unwrap();
+    accepted(&mut engine, market(5, OrderSide::Buy, 1));
+    accepted(&mut engine, limit(6, OrderSide::Sell, 100, 1));
 }
 
 #[test]
 fn aggregate_quantity_overflow_is_rejected() {
     let mut engine = Engine::new(2);
-    engine
-        .submit(limit(1, OrderSide::Sell, 100, u64::MAX))
-        .unwrap();
+    accepted(&mut engine, limit(1, OrderSide::Sell, 100, u64::MAX));
 
     let result = engine.submit(limit(2, OrderSide::Sell, 100, 1));
 
-    assert_eq!(result, Err(BookError::QuantityOverflow));
+    assert!(matches!(
+        result,
+        Ok(SubmitOutcome::Rejected(report))
+            if report.reason == RejectReason::QuantityOverflow
+    ));
 
-    let report = engine.submit(market(3, OrderSide::Buy, u64::MAX)).unwrap();
+    let report = accepted(&mut engine, market(3, OrderSide::Buy, u64::MAX));
     assert_eq!(report.trades.len(), 1);
     assert_eq!(report.trades[0].quantity, Quantity::from(u64::MAX));
 }

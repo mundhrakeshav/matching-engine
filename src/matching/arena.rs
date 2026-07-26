@@ -80,6 +80,10 @@ impl<T> Arena<T> {
         self.live_count
     }
 
+    pub(super) fn has_capacity(&self) -> bool {
+        self.live_count < self.capacity
+    }
+
     pub(super) fn release(&mut self, id: NodeId) -> Result<T, ArenaError> {
         if self.live_count == 0 {
             return Err(ArenaError::InvalidNode);
