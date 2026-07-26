@@ -172,3 +172,37 @@ fn aggregate_quantity_overflow_is_rejected() {
     assert_eq!(report.trades.len(), 1);
     assert_eq!(report.trades[0].quantity, Quantity::from(u64::MAX));
 }
+
+#[test]
+fn resting_order_can_be_cancelled_through_engine() {
+    let mut engine = Engine::new(2);
+    accepted(&mut engine, limit(1, OrderSide::Buy, 100, 5));
+
+    let cancelled = engine.cancel(OrderId::from(1)).unwrap();
+
+    assert_eq!(cancelled.resting.id, OrderId::from(1));
+    assert_eq!(cancelled.resting.open_qty, Quantity::from(5));
+    assert_eq!(cancelled.resting.status, OrderStatus::Cancelled);
+}
+
+#[test]
+fn partially_filled_order_can_be_cancelled_through_engine() {
+    let mut engine = Engine::new(2);
+    accepted(&mut engine, limit(1, OrderSide::Sell, 100, 5));
+    accepted(&mut engine, limit(2, OrderSide::Buy, 100, 2));
+
+    let cancelled = engine.cancel(OrderId::from(1)).unwrap();
+
+    assert_eq!(cancelled.resting.open_qty, Quantity::from(3));
+    assert_eq!(cancelled.resting.status, OrderStatus::Cancelled);
+}
+
+#[test]
+fn cancelling_a_missing_order_returns_an_engine_error() {
+    let mut engine = Engine::new(1);
+
+    assert!(matches!(
+        engine.cancel(OrderId::from(99)),
+        Err(ob::matching::EngineFault::OrderNotFound(OrderId(99)))
+    ));
+}

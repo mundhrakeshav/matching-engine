@@ -1,4 +1,4 @@
-use crate::domain::{Order, Sequence};
+use crate::domain::{Order, OrderId, Sequence};
 
 use super::{Book, BookError, EngineFault, RejectionReport, SubmitOutcome};
 
@@ -42,6 +42,25 @@ impl Engine {
             }
             Err(error) => Err(EngineFault::from_post_admission(error)),
         }
+    }
+
+    /// Cancels an active resting order through the engine command boundary.
+    ///
+    /// A successful cancellation consumes the next engine sequence. Missing
+    /// or already completed orders are rejected without advancing it.
+    pub fn cancel(&mut self, order_id: OrderId) -> Result<Order, EngineFault> {
+        let next_sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or(EngineFault::SequenceExhausted)?;
+        let cancelled = self
+            .book
+            .cancel(order_id)
+            .map_err(EngineFault::from_cancel_error)?;
+
+        self.sequence = next_sequence;
+
+        Ok(cancelled)
     }
 
     fn validate_submission(&self, order: &Order) -> Result<(), BookError> {

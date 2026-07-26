@@ -135,7 +135,11 @@ impl Book {
             ));
         }
         order.resting.accepted_sequence = command_sequence;
-        order.resting.status = OrderStatus::Accepted;
+        order
+            .resting
+            .status
+            .transition_to(OrderStatus::Accepted)
+            .map_err(|_| BookError::Invariant("invalid order status transition"))?;
 
         // Allocate 5 once to void re allocating if more needed
         let mut trades = Vec::with_capacity(5);
@@ -151,7 +155,11 @@ impl Book {
         if order.resting.open_qty > Quantity::from(0) && order.kind == OrderKind::Limit {
             self.rest(order.clone())?;
         } else if order.resting.open_qty > Quantity::from(0) {
-            order.resting.status = OrderStatus::Cancelled;
+            order
+                .resting
+                .status
+                .transition_to(OrderStatus::Cancelled)
+                .map_err(|_| BookError::Invariant("invalid order status transition"))?;
         }
 
         Ok(ExecutionReport {
@@ -417,7 +425,7 @@ impl Book {
             price: fill.price,
         };
 
-        taker.resting.open_qty =
+        let next_taker_quantity =
             taker
                 .resting
                 .open_qty
@@ -425,12 +433,15 @@ impl Book {
                 .ok_or(BookError::Invariant(
                     "planned fill exceeds the taker quantity during apply",
                 ))?;
-
-        taker.resting.status = if taker.resting.open_qty == Quantity::from(0) {
+        let next_taker_status = if next_taker_quantity == Quantity::from(0) {
             OrderStatus::Filled
         } else {
             OrderStatus::PartiallyFilled
         };
+        let mut taker_status = taker.resting.status;
+        taker_status
+            .transition_to(next_taker_status)
+            .map_err(|_| BookError::Invariant("invalid order status transition"))?;
 
         let maker_open_quantity = self
             .arena
@@ -448,6 +459,15 @@ impl Book {
                 ))?;
 
         let maker_fully_filled = next_maker_quantity == Quantity::from(0);
+        let next_maker_status = if maker_fully_filled {
+            OrderStatus::Filled
+        } else {
+            OrderStatus::PartiallyFilled
+        };
+        let mut maker_status = maker.order.resting.status;
+        maker_status
+            .transition_to(next_maker_status)
+            .map_err(|_| BookError::Invariant("invalid order status transition"))?;
 
         let maker_side = match taker.side {
             OrderSide::Buy => OrderSide::Sell,
@@ -474,12 +494,10 @@ impl Book {
             .map_err(|_| BookError::Invariant("validated maker node was released"))?
             .order
             .resting;
+        taker.resting.open_qty = next_taker_quantity;
+        taker.resting.status = taker_status;
         maker.open_qty = next_maker_quantity;
-        maker.status = if maker_fully_filled {
-            OrderStatus::Filled
-        } else {
-            OrderStatus::PartiallyFilled
-        };
+        maker.status = maker_status;
         self.levels_mut(maker_side)
             .get_mut(&fill.price)
             .ok_or(BookError::Invariant(
@@ -589,8 +607,12 @@ impl Book {
             .map_err(|_| BookError::Invariant("removed order node was released"))?
             .order
             .clone();
+        order
+            .resting
+            .status
+            .transition_to(OrderStatus::Cancelled)
+            .map_err(|_| BookError::Invariant("invalid order status transition"))?;
         self.remove_resting(node_id)?;
-        order.resting.status = OrderStatus::Cancelled;
         Ok(order)
     }
 

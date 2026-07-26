@@ -6,7 +6,7 @@ use std::fmt;
 
 pub use instrument::{Instrument, InstrumentId};
 pub use order::{Order, OrderError, OrderKind, OrderSide, RestingOrder};
-pub use status::OrderStatus;
+pub use status::{OrderStatus, StatusTransitionError};
 pub use trade::Trade;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

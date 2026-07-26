@@ -35,8 +35,8 @@ pub enum EngineFault {
     SequenceExhausted,
     #[error("order book invariant violated: {0}")]
     Invariant(&'static str),
-    #[error("unexpected order-not-found error while submitting order {0}")]
-    UnexpectedOrderNotFound(OrderId),
+    #[error("order not found: {0}")]
+    OrderNotFound(OrderId),
     #[error("book rejected an order after admission: {0}")]
     PostAdmission(#[source] BookError),
 }
@@ -55,7 +55,7 @@ impl RejectionReport {
             BookError::Invariant(message) => return Err(EngineFault::Invariant(message)),
             BookError::SequenceExhausted => return Err(EngineFault::SequenceExhausted),
             BookError::OrderNotFound(order_id) => {
-                return Err(EngineFault::UnexpectedOrderNotFound(*order_id));
+                return Err(EngineFault::OrderNotFound(*order_id));
             }
         };
 
@@ -72,7 +72,15 @@ impl EngineFault {
         match error {
             BookError::Invariant(message) => Self::Invariant(message),
             BookError::SequenceExhausted => Self::SequenceExhausted,
-            BookError::OrderNotFound(order_id) => Self::UnexpectedOrderNotFound(order_id),
+            BookError::OrderNotFound(order_id) => Self::OrderNotFound(order_id),
+            error => Self::PostAdmission(error),
+        }
+    }
+
+    pub(super) fn from_cancel_error(error: BookError) -> Self {
+        match error {
+            BookError::OrderNotFound(order_id) => Self::OrderNotFound(order_id),
+            BookError::Invariant(message) => Self::Invariant(message),
             error => Self::PostAdmission(error),
         }
     }
