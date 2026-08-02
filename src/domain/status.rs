@@ -20,15 +20,20 @@ pub struct StatusTransitionError {
 }
 
 impl OrderStatus {
+    /// Advances this status when the requested lifecycle transition is valid.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StatusTransitionError`] when the requested transition is not
+    /// permitted by the order lifecycle.
     pub fn transition_to(&mut self, next: Self) -> Result<(), StatusTransitionError> {
         let valid = matches!(
             (*self, next),
             (Self::New, Self::Accepted | Self::Rejected)
                 | (
-                    Self::Accepted,
+                    Self::Accepted | Self::PartiallyFilled,
                     Self::PartiallyFilled | Self::Filled | Self::Cancelled
                 )
-                | (Self::PartiallyFilled, Self::Filled | Self::Cancelled)
         );
 
         if !valid {
@@ -55,6 +60,7 @@ mod tests {
             (OrderStatus::Accepted, OrderStatus::PartiallyFilled),
             (OrderStatus::Accepted, OrderStatus::Filled),
             (OrderStatus::Accepted, OrderStatus::Cancelled),
+            (OrderStatus::PartiallyFilled, OrderStatus::PartiallyFilled),
             (OrderStatus::PartiallyFilled, OrderStatus::Filled),
             (OrderStatus::PartiallyFilled, OrderStatus::Cancelled),
         ];

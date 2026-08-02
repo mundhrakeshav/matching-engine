@@ -31,6 +31,10 @@ pub enum SubmitOutcome {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum EngineFault {
+    #[error("engine command queue is full")]
+    QueueFull,
+    #[error("engine worker has stopped")]
+    WorkerStopped,
     #[error("engine sequence exhausted")]
     SequenceExhausted,
     #[error("order book invariant violated: {0}")]

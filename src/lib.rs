@@ -1,7 +1,7 @@
 //! A deterministic, single-writer limit order book.
 //!
-//! The matching core is synchronous. Concurrency belongs at the service edge,
-//! where a mutex serializes command application and keeps book invariants intact.
+//! The matching core applies commands synchronously on one worker per engine.
+//! Concurrent callers enter through each engine's bounded command queue.
 
 pub mod domain;
 pub mod matching;

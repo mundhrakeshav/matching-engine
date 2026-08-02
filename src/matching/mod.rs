@@ -1,9 +1,11 @@
 mod arena;
 mod book;
+mod command;
 mod engine;
 mod instrument_registry;
 mod outcome;
 pub use book::{Book, BookError, ExecutionReport};
+pub use command::{CommandQueueError, EngineCommand, EngineReply};
 pub use engine::Engine;
 pub use instrument_registry::{InstrumentRegistry, InstrumentRegistryError};
 pub use outcome::{EngineFault, RejectReason, RejectionReport, SubmitOutcome};
