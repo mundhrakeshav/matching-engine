@@ -38,6 +38,25 @@ pub struct CancelReport {
 }
 
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PriceLevelView {
+    pub price: Price,
+    pub quantity: Quantity,
+    pub order_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TopOfBook {
+    pub bid: Option<PriceLevelView>,
+    pub ask: Option<PriceLevelView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BookSnapshot {
+    pub bids: Vec<PriceLevelView>,
+    pub asks: Vec<PriceLevelView>,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum BookError {
     #[error(transparent)]
@@ -85,6 +104,54 @@ impl Book {
         }
     }
 
+    /// Returns the best bid and best ask price levels.
+    #[must_use]
+    pub fn top_of_book(&self) -> TopOfBook {
+        TopOfBook {
+            bid: self
+                .bids
+                .last_key_value()
+                .map(|(&price, level)| Self::view(price, level)),
+            ask: self
+                .asks
+                .first_key_value()
+                .map(|(&price, level)| Self::view(price, level)),
+        }
+    }
+
+    /// Returns up to `levels` price levels on each side, best first.
+    #[must_use]
+    pub fn depth(&self, levels: usize) -> BookSnapshot {
+        BookSnapshot {
+            bids: self
+                .bids
+                .iter()
+                .rev()
+                .take(levels)
+                .map(|(&price, level)| Self::view(price, level))
+                .collect(),
+            asks: self
+                .asks
+                .iter()
+                .take(levels)
+                .map(|(&price, level)| Self::view(price, level))
+                .collect(),
+        }
+    }
+
+    /// Returns every active price level, best first on each side.
+    #[must_use]
+    pub fn snapshot(&self) -> BookSnapshot {
+        self.depth(self.bids.len().max(self.asks.len()))
+    }
+
+    fn view(price: Price, level: &PriceLevel) -> PriceLevelView {
+        PriceLevelView {
+            price,
+            quantity: level.quantity,
+            order_count: level.count,
+        }
+    }
     /// Matches an order and rests any eligible unfilled limit remainder.
     ///
     /// `submit` owns the matching loop. Each iteration computes one read-only

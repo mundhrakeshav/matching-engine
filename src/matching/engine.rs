@@ -1,6 +1,6 @@
-use crate::domain::{Order, Sequence};
+use crate::domain::{Order, OrderId, Sequence};
 
-use super::{Book, BookError, CancelReport, ExecutionReport};
+use super::{Book, BookError, BookSnapshot, CancelReport, ExecutionReport, TopOfBook};
 
 /// The sole command boundary. Every accepted order receives one monotonic sequence.
 #[derive(Debug)]
@@ -34,7 +34,25 @@ impl Engine {
     }
 
     /// Cancels an active resting order.
-    pub fn cancel(&mut self, order_id: crate::domain::OrderId) -> Result<CancelReport, BookError> {
+    pub fn cancel(&mut self, order_id: OrderId) -> Result<CancelReport, BookError> {
         self.book.cancel(order_id)
+    }
+
+    /// Returns the best bid and best ask without exposing mutable book state.
+    #[must_use]
+    pub fn top_of_book(&self) -> TopOfBook {
+        self.book.top_of_book()
+    }
+
+    /// Returns up to `levels` best price levels on each side.
+    #[must_use]
+    pub fn depth(&self, levels: usize) -> BookSnapshot {
+        self.book.depth(levels)
+    }
+
+    /// Returns all active price levels, best first on each side.
+    #[must_use]
+    pub fn snapshot(&self) -> BookSnapshot {
+        self.book.snapshot()
     }
 }

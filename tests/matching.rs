@@ -137,6 +137,96 @@ fn aggregate_quantity_overflow_is_rejected() {
 }
 
 #[test]
+fn top_of_book_returns_best_aggregated_levels() {
+    let mut engine = Engine::new(10);
+    engine.submit(limit(1, OrderSide::Buy, 99, 2)).unwrap();
+    engine.submit(limit(2, OrderSide::Buy, 100, 3)).unwrap();
+    engine.submit(limit(3, OrderSide::Sell, 102, 4)).unwrap();
+    engine.submit(limit(4, OrderSide::Sell, 101, 5)).unwrap();
+
+    let top = engine.top_of_book();
+
+    assert_eq!(
+        top.bid,
+        Some(ob::matching::PriceLevelView {
+            price: Price::from(100),
+            quantity: Quantity::from(3),
+            order_count: 1,
+        })
+    );
+    assert_eq!(
+        top.ask,
+        Some(ob::matching::PriceLevelView {
+            price: Price::from(101),
+            quantity: Quantity::from(5),
+            order_count: 1,
+        })
+    );
+}
+
+
+#[test]
+fn bounded_depth_is_best_first_and_aggregated() {
+    let mut engine = Engine::new(10);
+    engine.submit(limit(1, OrderSide::Buy, 98, 2)).unwrap();
+    engine.submit(limit(2, OrderSide::Buy, 100, 3)).unwrap();
+    engine.submit(limit(3, OrderSide::Buy, 99, 4)).unwrap();
+    engine.submit(limit(4, OrderSide::Sell, 103, 5)).unwrap();
+    engine.submit(limit(5, OrderSide::Sell, 101, 6)).unwrap();
+    engine.submit(limit(6, OrderSide::Sell, 102, 7)).unwrap();
+
+    let depth = engine.depth(2);
+
+    assert_eq!(
+        depth.bids,
+        vec![
+            ob::matching::PriceLevelView {
+                price: Price::from(100),
+                quantity: Quantity::from(3),
+                order_count: 1,
+            },
+            ob::matching::PriceLevelView {
+                price: Price::from(99),
+                quantity: Quantity::from(4),
+                order_count: 1,
+            },
+        ]
+    );
+    assert_eq!(
+        depth.asks,
+        vec![
+            ob::matching::PriceLevelView {
+                price: Price::from(101),
+                quantity: Quantity::from(6),
+                order_count: 1,
+            },
+            ob::matching::PriceLevelView {
+                price: Price::from(102),
+                quantity: Quantity::from(7),
+                order_count: 1,
+            },
+        ]
+    );
+}
+
+#[test]
+fn full_snapshot_contains_all_levels() {
+    let mut engine = Engine::new(10);
+    engine.submit(limit(1, OrderSide::Buy, 98, 2)).unwrap();
+    engine.submit(limit(2, OrderSide::Buy, 100, 3)).unwrap();
+    engine.submit(limit(3, OrderSide::Buy, 99, 4)).unwrap();
+    engine.submit(limit(4, OrderSide::Sell, 103, 5)).unwrap();
+    engine.submit(limit(5, OrderSide::Sell, 101, 6)).unwrap();
+    engine.submit(limit(6, OrderSide::Sell, 102, 7)).unwrap();
+
+    let snapshot = engine.snapshot();
+
+    assert_eq!(snapshot.bids.len(), 3);
+    assert_eq!(snapshot.asks.len(), 3);
+    assert_eq!(snapshot.bids[2].price, Price::from(98));
+    assert_eq!(snapshot.asks[2].price, Price::from(103));
+}
+#[test]
 fn cancel_removes_order_and_releases_capacity() {
     let mut engine = Engine::new(1);
     engine.submit(limit(1, OrderSide::Sell, 100, 4)).unwrap();
@@ -169,5 +259,45 @@ fn cancel_unlinks_middle_order_without_changing_fifo_order() {
             .map(|trade| trade.maker_order_id)
             .collect::<Vec<_>>(),
         vec![OrderId::from(1), OrderId::from(3)]
+    );
+}
+
+#[test]
+fn canceling_head_preserves_tail_and_remaining_fifo_order() {
+    let mut engine = Engine::new(3);
+    engine.submit(limit(1, OrderSide::Sell, 100, 1)).unwrap();
+    engine.submit(limit(2, OrderSide::Sell, 100, 1)).unwrap();
+    engine.submit(limit(3, OrderSide::Sell, 100, 1)).unwrap();
+    engine.cancel(OrderId::from(1)).unwrap();
+
+    let report = engine.submit(limit(4, OrderSide::Buy, 100, 2)).unwrap();
+
+    assert_eq!(
+        report
+            .trades
+            .iter()
+            .map(|trade| trade.maker_order_id)
+            .collect::<Vec<_>>(),
+        vec![OrderId::from(2), OrderId::from(3)]
+    );
+}
+
+#[test]
+fn canceling_tail_preserves_head_and_remaining_fifo_order() {
+    let mut engine = Engine::new(3);
+    engine.submit(limit(1, OrderSide::Sell, 100, 1)).unwrap();
+    engine.submit(limit(2, OrderSide::Sell, 100, 1)).unwrap();
+    engine.submit(limit(3, OrderSide::Sell, 100, 1)).unwrap();
+    engine.cancel(OrderId::from(3)).unwrap();
+
+    let report = engine.submit(limit(4, OrderSide::Buy, 100, 2)).unwrap();
+
+    assert_eq!(
+        report
+            .trades
+            .iter()
+            .map(|trade| trade.maker_order_id)
+            .collect::<Vec<_>>(),
+        vec![OrderId::from(1), OrderId::from(2)]
     );
 }
