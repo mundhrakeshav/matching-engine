@@ -31,10 +31,19 @@ pub struct ExecutionReport {
     pub trades: Vec<Trade>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CancelReport {
+    pub order_id: OrderId,
+    pub canceled_quantity: Quantity,
+}
+
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum BookError {
     #[error(transparent)]
     InvalidOrder(#[from] OrderError),
+    #[error("order not found: {0}")]
+    OrderNotFound(OrderId),
     #[error("duplicate active order ID: {0}")]
     DuplicateOrder(OrderId),
     #[error("order book has no room to rest the unfilled remainder")]
@@ -116,6 +125,31 @@ impl Book {
             order_id: order.resting.id,
             remaining_quantity: order.resting.open_qty,
             trades,
+        })
+    }
+
+    /// Cancels an active resting order and removes it from its FIFO level.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BookError::OrderNotFound`] when the order is not active, or
+    /// [`BookError::Invariant`] when the book's internal links are inconsistent.
+    pub fn cancel(&mut self, order_id: OrderId) -> Result<CancelReport, BookError> {
+        let node_id = *self
+            .locations
+            .get(&order_id)
+            .ok_or(BookError::OrderNotFound(order_id))?;
+        let canceled_quantity = self
+            .arena
+            .get(node_id)
+            .map_err(|_| BookError::Invariant("located order node was released"))?
+            .order
+            .resting
+            .open_qty;
+        self.remove_resting(node_id)?;
+        Ok(CancelReport {
+            order_id,
+            canceled_quantity,
         })
     }
 

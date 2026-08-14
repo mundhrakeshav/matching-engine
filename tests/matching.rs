@@ -135,3 +135,39 @@ fn aggregate_quantity_overflow_is_rejected() {
     assert_eq!(report.trades.len(), 1);
     assert_eq!(report.trades[0].quantity, Quantity::from(u64::MAX));
 }
+
+#[test]
+fn cancel_removes_order_and_releases_capacity() {
+    let mut engine = Engine::new(1);
+    engine.submit(limit(1, OrderSide::Sell, 100, 4)).unwrap();
+
+    let report = engine.cancel(OrderId::from(1)).unwrap();
+    assert_eq!(report.order_id, OrderId::from(1));
+    assert_eq!(report.canceled_quantity, Quantity::from(4));
+
+    assert_eq!(
+        engine.cancel(OrderId::from(1)),
+        Err(BookError::OrderNotFound(OrderId::from(1)))
+    );
+    engine.submit(limit(2, OrderSide::Sell, 100, 3)).unwrap();
+}
+
+#[test]
+fn cancel_unlinks_middle_order_without_changing_fifo_order() {
+    let mut engine = Engine::new(3);
+    engine.submit(limit(1, OrderSide::Sell, 100, 1)).unwrap();
+    engine.submit(limit(2, OrderSide::Sell, 100, 1)).unwrap();
+    engine.submit(limit(3, OrderSide::Sell, 100, 1)).unwrap();
+    engine.cancel(OrderId::from(2)).unwrap();
+
+    let report = engine.submit(limit(4, OrderSide::Buy, 100, 2)).unwrap();
+
+    assert_eq!(
+        report
+            .trades
+            .iter()
+            .map(|trade| trade.maker_order_id)
+            .collect::<Vec<_>>(),
+        vec![OrderId::from(1), OrderId::from(3)]
+    );
+}

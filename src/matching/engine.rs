@@ -1,6 +1,6 @@
 use crate::domain::{Order, Sequence};
 
-use super::{Book, BookError, ExecutionReport};
+use super::{Book, BookError, CancelReport, ExecutionReport};
 
 /// The sole command boundary. Every accepted order receives one monotonic sequence.
 #[derive(Debug)]
@@ -31,5 +31,10 @@ impl Engine {
         let report = self.book.submit(order, next_sequence)?;
         self.sequence = next_sequence;
         Ok(report)
+    }
+
+    /// Cancels an active resting order.
+    pub fn cancel(&mut self, order_id: crate::domain::OrderId) -> Result<CancelReport, BookError> {
+        self.book.cancel(order_id)
     }
 }
