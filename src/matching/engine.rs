@@ -34,6 +34,10 @@ impl Engine {
     }
 
     /// Cancels an active resting order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BookError::OrderNotFound`] when the order is not active.
     pub fn cancel(&mut self, order_id: OrderId) -> Result<CancelReport, BookError> {
         self.book.cancel(order_id)
     }

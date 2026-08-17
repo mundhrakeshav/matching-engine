@@ -40,6 +40,50 @@ pub struct Price(pub i64);
 #[serde(transparent)]
 pub struct Quantity(pub u64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct Symbol(pub [u8; 8]);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SymbolError;
+
+impl Symbol {
+    pub const WIDTH: usize = 8;
+
+    /// Parses a non-empty ASCII symbol no longer than eight bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SymbolError`] for empty, non-ASCII, or oversized values.
+    pub fn parse(value: &str) -> Result<Self, SymbolError> {
+        if value.is_empty() || value.len() > Self::WIDTH || !value.is_ascii() {
+            return Err(SymbolError);
+        }
+        let mut bytes = [0; Self::WIDTH];
+        bytes[..value.len()].copy_from_slice(value.as_bytes());
+        Ok(Self(bytes))
+    }
+
+    /// Returns the symbol's trimmed ASCII representation.
+    ///
+    /// # Panics
+    ///
+    /// Cannot panic for values constructed by [`Symbol::parse`].
+    pub fn as_str(&self) -> &str {
+        let length = self
+            .0
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(Self::WIDTH);
+        std::str::from_utf8(&self.0[..length]).expect("Symbol only accepts ASCII")
+    }
+}
+
+impl std::fmt::Display for Symbol {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 impl fmt::Display for OrderId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)

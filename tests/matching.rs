@@ -1,8 +1,9 @@
 use ob::{
     domain::{
-        Order, OrderId, OrderKind, OrderSide, Price, Quantity, RestingOrder, Sequence, UserId,
+        Order, OrderId, OrderKind, OrderSide, Price, Quantity, RestingOrder, Sequence, Symbol,
+        UserId,
     },
-    matching::{BookError, Engine},
+    matching::{BookError, Engine, Exchange, ExchangeError},
 };
 
 fn limit(id: u64, side: OrderSide, price: i64, quantity: u64) -> Order {
@@ -164,7 +165,6 @@ fn top_of_book_returns_best_aggregated_levels() {
     );
 }
 
-
 #[test]
 fn bounded_depth_is_best_first_and_aggregated() {
     let mut engine = Engine::new(10);
@@ -300,4 +300,37 @@ fn canceling_tail_preserves_head_and_remaining_fifo_order() {
             .collect::<Vec<_>>(),
         vec![OrderId::from(1), OrderId::from(2)]
     );
+}
+
+#[test]
+fn exchange_keeps_instruments_isolated() {
+    let btc = Symbol::parse("BTC-USD").unwrap();
+    let eth = Symbol::parse("ETH-USD").unwrap();
+    let mut exchange = Exchange::new(4);
+    exchange.prepare_symbols([btc, eth]);
+
+    exchange
+        .submit(btc, limit(1, OrderSide::Sell, 100, 2))
+        .unwrap();
+    let report = exchange
+        .submit(eth, limit(2, OrderSide::Buy, 100, 2))
+        .unwrap();
+
+    assert!(report.trades.is_empty());
+    assert_eq!(report.remaining_quantity, Quantity::from(2));
+    assert_eq!(
+        exchange.top_of_book(btc).unwrap().ask.unwrap().quantity,
+        Quantity::from(2)
+    );
+    assert!(exchange.top_of_book(eth).unwrap().bid.is_some());
+}
+
+#[test]
+fn exchange_rejects_unknown_instrument() {
+    let symbol = Symbol::parse("BTC-USD").unwrap();
+    let mut exchange = Exchange::new(1);
+
+    let result = exchange.submit(symbol, limit(1, OrderSide::Buy, 100, 1));
+
+    assert_eq!(result, Err(ExchangeError::UnknownSymbol(symbol)));
 }
