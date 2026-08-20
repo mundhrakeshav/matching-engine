@@ -1,9 +1,15 @@
 //! A deterministic, single-writer limit order book.
 //!
-//! The matching core is synchronous. Concurrency belongs at the service edge,
-//! where a mutex serializes command application and keeps book invariants intact.
+//! `domain` and `matching` are the pure matching core: synchronous, with no
+//! knowledge of transport, concurrency, or configuration. `service` is the
+//! sole owner of the Disruptor-backed, concurrency-safe engine handles that
+//! `http` (and any future transport, such as an offline backtest runner) is
+//! built on. `config` is the only module that reads the process environment.
+//! `app` wires all of the above together.
 
+pub mod app;
+pub mod config;
 pub mod domain;
+pub mod http;
 pub mod matching;
-
-pub mod api;
+pub mod service;

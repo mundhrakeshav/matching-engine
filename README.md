@@ -1,14 +1,31 @@
 # ob
 
-A Rust multi-instrument limit-order-book service. The matching core is deterministic and synchronous; each configured symbol has a separate engine consumer and a fixed-capacity multi-producer Disruptor command ring. HTTP handlers publish commands to the appropriate ring and never mutate a book directly.
+A Rust multi-instrument limit-order-book service. The matching core is deterministic and synchronous; each configured symbol has a separate engine consumer and a fixed-capacity multi-producer Disruptor command ring. HTTP handlers publish commands to the appropriate ring through the `service` layer and never construct or mutate a book directly.
 
 ## Layout
 
 - `src/domain` — order, symbol, price, quantity, and trade types plus validation.
-- `src/matching` — arena-backed FIFO levels, matching rules, per-symbol engines, and exchange routing.
-- `src/api.rs` — Axum routes, HTTP mapping, per-symbol command-ring routing, and replies.
-- `src/main.rs` — runtime wiring, configured symbols, and process lifecycle.
-- `tests` — black-box matching and exchange behavior tests.
+- `src/matching` — arena-backed FIFO levels, matching rules, per-symbol engines, and exchange routing. Pure and synchronous: no transport, concurrency, or config knowledge.
+- `src/service` — the only module outside `matching` allowed to hold an `Engine`/`Exchange`. Owns the per-symbol Disruptor command rings and exposes a transport-agnostic, async `ExchangeClient` (`book`/`submit`/`cancel`).
+- `src/http` — Axum routes, request/response DTOs, and HTTP status mapping. Talks only to `service::ExchangeClient`.
+- `src/config.rs` — the only module that reads `std::env`. Loads an optional `.env` file and returns a validated `Config`.
+- `src/app.rs` — the composition root: loads `Config`, wires `matching::Exchange` → `service::spawn_exchange` → `http::router`, and runs the server.
+- `src/main.rs` — process entrypoint; delegates to `app::run()`.
+- `tests` — black-box matching and exchange behavior tests against `domain`/`matching` directly.
+
+## Configuration
+
+All configuration is read from the environment (see `.env.example`); nothing is hardcoded. Copy `.env.example` to `.env` and adjust as needed — `.env` is loaded automatically (missing file is fine) and explicit process environment variables always win.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `HOST` | `0.0.0.0` | Listen address |
+| `PORT` | `8080` | Listen port |
+| `SERVICE_NAME` | `ob` | Logged at startup |
+| `LOG_LEVEL` | `info` | Logged at startup |
+| `BOOK_CAPACITY` | `100000` | Resting-order capacity per symbol |
+| `RING_CAPACITY` | `1024` | Per-symbol Disruptor command ring capacity; must be a power of two and at least 64 |
+| `SYMBOLS` | `BTC-USD` | Comma-separated symbols prepared at startup |
 
 ## Run
 
@@ -16,7 +33,7 @@ A Rust multi-instrument limit-order-book service. The matching core is determini
 cargo run
 ```
 
-The service listens on `0.0.0.0:8080`. It configures `BTC-USD` at startup and exposes:
+With the default configuration, the service listens on `0.0.0.0:8080` and configures `BTC-USD` at startup. It exposes:
 
 - `GET /healthz`
 - `GET /v1/matching/book?symbol=BTC-USD&depth=top`
@@ -49,4 +66,4 @@ make lint
 make test
 ```
 
-`BOOK_CAPACITY` is currently configured at startup as 100,000 resting orders per symbol. Market-order remainders are cancelled (never rested). Each symbol has a 1,024-slot Disruptor command ring; a full ring returns HTTP `503`. Ring capacity must be a power of two and at least 64. The development consumer wait strategy sleeps for one millisecond while idle.
+Market-order remainders are cancelled (never rested). A full command ring returns HTTP `503`. The development consumer wait strategy sleeps for one millisecond while idle.
